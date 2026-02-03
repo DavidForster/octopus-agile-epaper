@@ -8,6 +8,7 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <time.h>
 #include <sys/time.h>
+#include <cstring>
 #include "credentials.h"  // WiFi credentials
 
 // Pin definitions for ESP32 SPI connection
@@ -109,6 +110,15 @@ bool syncTimeFromHttp() {
   return waitForTimeSync();
 }
 
+bool timeToUtcStruct(time_t timestamp, struct tm& out) {
+  struct tm* tmp = gmtime(&timestamp);
+  if (!tmp) {
+    return false;
+  }
+  memcpy(&out, tmp, sizeof(struct tm));
+  return true;
+}
+
 String extractTimeFromISO(const char* isoTime) {
   if (!isoTime) {
     return "--:--";
@@ -135,16 +145,48 @@ bool fetchCurrentPrice() {
     now = time(nullptr);
   }
 
-  struct tm* timeInfo = gmtime(&now);
-  char isoBuffer[25];
-  strftime(isoBuffer, sizeof(isoBuffer), "%Y-%m-%dT%H:%M:%SZ", timeInfo);
+  struct tm currentInfo;
+  if (!timeToUtcStruct(now, currentInfo)) {
+    statusMessage = "Time convert failed";
+    return false;
+  }
+
+  // Octopus pricing periods run from 23:00 UTC to 23:00 UTC
+  // Calculate the most recent 23:00 UTC (yesterday if before 23:00, today if after)
+  int secondsIntoDay = currentInfo.tm_hour * 3600 + currentInfo.tm_min * 60 + currentInfo.tm_sec;
+  time_t dayStart = now > secondsIntoDay ? now - secondsIntoDay : 0;
+
+  // Adjust to start from 23:00 yesterday (subtract 1 hour from midnight)
+  time_t periodStart = dayStart > 3600 ? dayStart - 3600 : 0;
+
+  // Period end is 23:00 today (start + 24 hours)
+  time_t periodEnd = periodStart + 86400;
+
+  struct tm periodStartInfo, periodEndInfo;
+  if (!timeToUtcStruct(periodStart, periodStartInfo)) {
+    statusMessage = "Period start failed";
+    return false;
+  }
+  if (!timeToUtcStruct(periodEnd, periodEndInfo)) {
+    statusMessage = "Period end failed";
+    return false;
+  }
+
+  char currentIso[25];
+  char periodStartIso[25];
+  char periodEndIso[25];
+  strftime(currentIso, sizeof(currentIso), "%Y-%m-%dT%H:%M:%SZ", &currentInfo);
+  strftime(periodStartIso, sizeof(periodStartIso), "%Y-%m-%dT%H:%M:%SZ", &periodStartInfo);
+  strftime(periodEndIso, sizeof(periodEndIso), "%Y-%m-%dT%H:%M:%SZ", &periodEndInfo);
 
   String url = "https://api.octopus.energy/v1/products/";
   url += OCTOPUS_PRODUCT_CODE;
   url += "/electricity-tariffs/";
   url += OCTOPUS_TARIFF_CODE;
-  url += "/standard-unit-rates/?page_size=1&period_from=";
-  url += isoBuffer;
+  url += "/standard-unit-rates/?period_from=";
+  url += periodStartIso;
+  url += "&period_to=";
+  url += periodEndIso;
 
   Serial.print("Requesting rate: ");
   Serial.println(url);
@@ -187,10 +229,72 @@ bool fetchCurrentPrice() {
     return false;
   }
 
-  JsonObject rate = results[0];
-  double priceValue = rate["value_inc_vat"] | -1.0;
-  const char* validFrom = rate["valid_from"] | "";
-  const char* validTo = rate["valid_to"] | "";
+  Serial.print("Found ");
+  Serial.print(results.size());
+  Serial.println(" rate periods");
+  Serial.print("Current time (UTC): ");
+  Serial.println(currentIso);
+
+  // Debug: Print first 3 rates to see what we're getting
+  Serial.println("First 3 rates from API:");
+  for (int i = 0; i < 3 && i < results.size(); i++) {
+    JsonObject rate = results[i];
+    Serial.print("  ");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.print(rate["valid_from"].as<const char*>());
+    Serial.print(" to ");
+    Serial.print(rate["valid_to"].as<const char*>());
+    Serial.print(" = ");
+    Serial.print(rate["value_inc_vat"].as<double>());
+    Serial.println(" p");
+  }
+
+  JsonObject selectedRate;
+  bool hasSelectedRate = false;
+  JsonObject fallbackRate;
+  bool hasFallbackRate = false;
+
+  for (JsonObject rate : results) {
+    if (!hasFallbackRate) {
+      fallbackRate = rate;
+      hasFallbackRate = true;
+    }
+
+    const char* validFromCandidate = rate["valid_from"] | "";
+    const char* validToCandidate = rate["valid_to"] | "";
+    if (strlen(validFromCandidate) == 0 || strlen(validToCandidate) == 0) {
+      continue;
+    }
+
+    // Compare only first 19 characters (YYYY-MM-DDTHH:MM:SS) to ignore fractional seconds
+    if ((strncmp(validFromCandidate, currentIso, 19) <= 0) && (strncmp(currentIso, validToCandidate, 19) < 0)) {
+      selectedRate = rate;
+      hasSelectedRate = true;
+      Serial.print("Matched current slot: ");
+      Serial.print(validFromCandidate);
+      Serial.print(" to ");
+      Serial.println(validToCandidate);
+      break;
+    }
+  }
+
+  JsonObject rateObject;
+  if (hasSelectedRate) {
+    rateObject = selectedRate;
+    statusMessage = "";
+  } else if (hasFallbackRate) {
+    rateObject = fallbackRate;
+    statusMessage = "Showing next slot";
+  } else {
+    Serial.println("No rate data returned.");
+    statusMessage = "No rate data";
+    return false;
+  }
+
+  double priceValue = rateObject["value_inc_vat"] | -1.0;
+  const char* validFrom = rateObject["valid_from"] | "";
+  const char* validTo = rateObject["valid_to"] | "";
 
   if (priceValue < 0) {
     Serial.println("Invalid price value.");
@@ -200,8 +304,7 @@ bool fetchCurrentPrice() {
 
   currentPrice = String(priceValue, 2) + " p/kWh";
   priceWindow = extractTimeFromISO(validFrom) + " - " + extractTimeFromISO(validTo) + " UTC";
-  lastUpdated = isoBuffer;
-  statusMessage = "";
+  lastUpdated = currentIso;
 
   Serial.print("Current price: ");
   Serial.println(currentPrice);
