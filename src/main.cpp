@@ -475,12 +475,12 @@ void drawPriceGraph(int x, int y, int width, int height) {
   struct tm timeInfo;
   for (int i = 0; i < rateCount; i++) {
     if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
-      // Show label every 1 hour on the hour
-      if (timeInfo.tm_min == 0 && timeInfo.tm_hour % 1 == 0) {
+      // Show label every 2 hours on the hour
+      if (timeInfo.tm_min == 0 && timeInfo.tm_hour % 2 == 0) {
         int labelX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
-        char timeLabel[10];
-        snprintf(timeLabel, sizeof(timeLabel), "%02d:00", timeInfo.tm_hour);
-        display.setCursor(labelX - 10, y + height + 8);
+        char timeLabel[4];
+        snprintf(timeLabel, sizeof(timeLabel), "%d", timeInfo.tm_hour);
+        display.setCursor(labelX - 3, y + height + 5);
         display.print(timeLabel);
       }
     }
@@ -505,10 +505,10 @@ void updateDisplay() {
     display.fillScreen(GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
 
-    // Draw price graph maximized (if we have data)
-    // x=35 (room for Y labels), y=5, width=255, height=120 (increased from 115)
+    // Draw price graph with room for time labels at bottom
+    // x=35 (room for Y labels), y=5, width=255, height=110 (leaves room for hour labels)
     if (rateCount > 0) {
-      drawPriceGraph(35, 5, 255, 120);
+      drawPriceGraph(35, 5, 255, 110);
     }
 
   } while (display.nextPage());
