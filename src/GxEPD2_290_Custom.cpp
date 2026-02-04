@@ -380,7 +380,7 @@ void GxEPD2_290_Custom::_Init_Part()
 void GxEPD2_290_Custom::_Update_Full()
 {
   _writeCommand(0x22);
-  _writeData(0xc7); // Changed from 0xc4 to enable white border
+  _writeData(0xc4); // Keep original value - 0xc7 causes timeouts
   _writeCommand(0x20);
   _waitWhileBusy("_Update_Full", full_refresh_time);
   _writeCommand(0xff);

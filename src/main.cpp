@@ -538,7 +538,8 @@ void setup() {
   // Initialize the display
   display.init(115200, true, 2, false);  // Last param false = no border
   display.setRotation(1);
-  clearDisplay();
+  // Skip initial clearDisplay() to avoid timeout with custom driver
+  // Display will be updated with content immediately after data fetch
 
   // Connect to WiFi
   Serial.print("Connecting to WiFi");
