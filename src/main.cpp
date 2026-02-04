@@ -506,21 +506,10 @@ void updateDisplay() {
     display.setTextColor(GxEPD_BLACK);
 
     // Draw price graph maximized (if we have data)
-    // x=35 (room for Y labels), y=5, width=255, height=115
+    // x=35 (room for Y labels), y=5, width=255, height=120 (increased from 115)
     if (rateCount > 0) {
-      drawPriceGraph(35, 5, 255, 115);
+      drawPriceGraph(35, 5, 255, 120);
     }
-
-    // Footer
-    display.setFont();
-    display.setCursor(2, 125);
-    String footer = "WiFi: " + WiFi.SSID();
-    if (statusMessage.length() > 0) {
-      footer += " | " + statusMessage;
-    } else {
-      footer += " | BOOT=Refresh";
-    }
-    display.print(footer);
 
   } while (display.nextPage());
 
