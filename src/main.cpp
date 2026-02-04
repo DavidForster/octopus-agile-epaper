@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>
+#include "GxEPD2_290_Custom.h"  // Custom driver with white border
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <time.h>
@@ -18,8 +19,8 @@
 #define EPD_BUSY  4
 #define BUTTON_PIN 0  // BOOT button on most ESP32 boards
 
-// Initialize display (296x128, 2.9" Waveshare)
-GxEPD2_BW<GxEPD2_290, GxEPD2_290::HEIGHT> display(GxEPD2_290(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+// Initialize display (296x128, 2.9" Waveshare) with custom driver
+GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custom(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
 #ifndef OCTOPUS_PRODUCT_CODE
 #define OCTOPUS_PRODUCT_CODE "AGILE-24-10-01"
@@ -42,6 +43,16 @@ String priceWindow = "Waiting for data...";
 String lastUpdated = "--";
 String statusMessage = "";
 bool lastButtonState = HIGH;
+
+// Store rate data for graphing
+struct RateData {
+  time_t validFrom;
+  double price;
+};
+RateData rates[60];  // 27 hours * 2 slots per hour = 54, with some buffer
+int rateCount = 0;
+int currentRateIndex = -1;
+time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
 
 bool waitForTimeSync() {
   time_t now = time(nullptr);
@@ -83,7 +94,7 @@ bool syncTimeFromHttp() {
     return false;
   }
 
-  DynamicJsonDocument timeDoc(1024);
+  JsonDocument timeDoc;
   DeserializationError error = deserializeJson(timeDoc, http.getString());
   http.end();
   if (error) {
@@ -130,6 +141,31 @@ String extractTimeFromISO(const char* isoTime) {
   return timeString;
 }
 
+time_t parseISOTimestamp(const char* isoTime) {
+  if (!isoTime || strlen(isoTime) < 19) {
+    return 0;
+  }
+
+  struct tm tm = {0};
+  int year, month, day, hour, min, sec;
+
+  if (sscanf(isoTime, "%d-%d-%dT%d:%d:%d",
+             &year, &month, &day, &hour, &min, &sec) == 6) {
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
+    tm.tm_sec = sec;
+    tm.tm_isdst = 0;
+
+    // Convert to time_t - since we configured ESP32 with UTC (configTime(0, 0, ...)),
+    // mktime treats this as UTC
+    return mktime(&tm);
+  }
+  return 0;
+}
+
 bool fetchCurrentPrice() {
   if (WiFi.status() != WL_CONNECTED) {
     statusMessage = "WiFi disconnected";
@@ -151,16 +187,10 @@ bool fetchCurrentPrice() {
     return false;
   }
 
-  // Octopus pricing periods run from 23:00 UTC to 23:00 UTC
-  // Calculate the most recent 23:00 UTC (yesterday if before 23:00, today if after)
-  int secondsIntoDay = currentInfo.tm_hour * 3600 + currentInfo.tm_min * 60 + currentInfo.tm_sec;
-  time_t dayStart = now > secondsIntoDay ? now - secondsIntoDay : 0;
-
-  // Adjust to start from 23:00 yesterday (subtract 1 hour from midnight)
-  time_t periodStart = dayStart > 3600 ? dayStart - 3600 : 0;
-
-  // Period end is 23:00 today (start + 24 hours)
-  time_t periodEnd = periodStart + 86400;
+  // Get prices for last 3 hours and next 24 hours
+  time_t periodStart = now - 10800;  // 3 hours ago (3 * 3600 seconds)
+  time_t periodEnd = now + 86400;    // 24 hours from now
+  graphStartTime = periodStart;      // Store for axis labels
 
   struct tm periodStartInfo, periodEndInfo;
   if (!timeToUtcStruct(periodStart, periodStartInfo)) {
@@ -213,7 +243,7 @@ bool fetchCurrentPrice() {
   String payload = http.getString();
   http.end();
 
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, payload);
   if (error) {
     Serial.print("JSON parse failed: ");
@@ -250,12 +280,28 @@ bool fetchCurrentPrice() {
     Serial.println(" p");
   }
 
+  // Store all rates for graphing and find current rate
   JsonObject selectedRate;
   bool hasSelectedRate = false;
   JsonObject fallbackRate;
   bool hasFallbackRate = false;
+  rateCount = 0;
+  currentRateIndex = -1;
 
+  int loopIndex = 0;
   for (JsonObject rate : results) {
+    // Store rate data for graphing with actual timestamps
+    if (rateCount < 60) {
+      const char* validFromStr = rate["valid_from"] | "";
+      double priceVal = rate["value_inc_vat"] | 0.0;
+
+      if (priceVal > 0 && strlen(validFromStr) > 0) {
+        rates[rateCount].price = priceVal;
+        rates[rateCount].validFrom = parseISOTimestamp(validFromStr);
+        rateCount++;
+      }
+    }
+
     if (!hasFallbackRate) {
       fallbackRate = rate;
       hasFallbackRate = true;
@@ -271,12 +317,36 @@ bool fetchCurrentPrice() {
     if ((strncmp(validFromCandidate, currentIso, 19) <= 0) && (strncmp(currentIso, validToCandidate, 19) < 0)) {
       selectedRate = rate;
       hasSelectedRate = true;
+      currentRateIndex = rateCount - 1;  // Current rate is the last one we stored
       Serial.print("Matched current slot: ");
       Serial.print(validFromCandidate);
       Serial.print(" to ");
       Serial.println(validToCandidate);
       break;
     }
+
+    loopIndex++;
+  }
+
+  Serial.print("Stored ");
+  Serial.print(rateCount);
+  Serial.print(" rates for graphing, current index: ");
+  Serial.println(currentRateIndex);
+
+  // Reverse the rates array to get chronological order (API returns newest first)
+  for (int i = 0; i < rateCount / 2; i++) {
+    RateData temp = rates[i];
+    rates[i] = rates[rateCount - 1 - i];
+    rates[rateCount - 1 - i] = temp;
+  }
+  // Update current rate index after reversal
+  if (currentRateIndex >= 0) {
+    currentRateIndex = rateCount - 1 - currentRateIndex;
+  }
+
+  // Update graphStartTime to use actual data range for better width usage
+  if (rateCount > 0) {
+    graphStartTime = rates[0].validFrom;
   }
 
   JsonObject rateObject;
@@ -314,12 +384,116 @@ bool fetchCurrentPrice() {
   return true;
 }
 
+void drawPriceGraph(int x, int y, int width, int height) {
+  if (rateCount < 2 || graphStartTime == 0) return;
+
+  // Find min/max prices for scaling
+  double minPrice = rates[0].price;
+  double maxPrice = rates[0].price;
+  for (int i = 1; i < rateCount; i++) {
+    if (rates[i].price < minPrice) minPrice = rates[i].price;
+    if (rates[i].price > maxPrice) maxPrice = rates[i].price;
+  }
+
+  // Round to nice values for axis (multiples of 5)
+  minPrice = floor(minPrice / 5.0) * 5.0;
+  maxPrice = ceil(maxPrice / 5.0) * 5.0;
+  if (maxPrice - minPrice < 10) maxPrice = minPrice + 10;
+  double priceRange = maxPrice - minPrice;
+
+  // Calculate median price for color threshold
+  double sortedPrices[60];
+  for (int i = 0; i < rateCount; i++) {
+    sortedPrices[i] = rates[i].price;
+  }
+  for (int i = 0; i < rateCount - 1; i++) {
+    for (int j = i + 1; j < rateCount; j++) {
+      if (sortedPrices[i] > sortedPrices[j]) {
+        double temp = sortedPrices[i];
+        sortedPrices[i] = sortedPrices[j];
+        sortedPrices[j] = temp;
+      }
+    }
+  }
+  double medianPrice = sortedPrices[rateCount / 2];
+
+  // Calculate time range based on actual data (from first to last rate + 30 min slot)
+  time_t timeRange = rates[rateCount - 1].validFrom - graphStartTime + 1800;
+
+  // Draw horizontal grid lines at 5p intervals
+  display.setFont();
+  for (double price = minPrice; price <= maxPrice; price += 5.0) {
+    int gridY = y + height - (int)((price - minPrice) / priceRange * height);
+    display.drawLine(x, gridY, x + width, gridY, GxEPD_BLACK);
+
+    // Draw Y-axis label
+    char label[10];
+    snprintf(label, sizeof(label), "%.1fp", price);
+    display.setCursor(2, gridY + 3);
+    display.print(label);
+  }
+
+  // Draw bars for each rate
+  for (int i = 0; i < rateCount; i++) {
+    // Calculate x position and width based on time
+    int barX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
+    int nextX;
+    if (i < rateCount - 1) {
+      nextX = x + ((rates[i + 1].validFrom - graphStartTime) * width) / timeRange;
+    } else {
+      // For the last bar, assume 30-minute slot (1800 seconds)
+      nextX = x + ((rates[i].validFrom + 1800 - graphStartTime) * width) / timeRange;
+    }
+    int barWidth = nextX - barX - 1;  // -1 for spacing between bars
+
+    // Calculate bar height
+    int barHeight = (int)((rates[i].price - minPrice) / priceRange * height);
+    int barY = y + height - barHeight;
+
+    // Ensure bar is within bounds
+    barX = constrain(barX, x, x + width);
+    barWidth = constrain(barWidth, 1, width);
+    barY = constrain(barY, y, y + height);
+    barHeight = constrain(barHeight, 0, height);
+
+    // Fill bar with color (green for low, red for high)
+    // E-paper displays: GxEPD_BLACK for filled, GxEPD_WHITE for outline
+    // We'll use filled rectangles with borders
+    if (rates[i].price > medianPrice) {
+      // High price - draw as filled black (will appear dark)
+      display.fillRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+    } else {
+      // Low price - draw as white with black border
+      display.fillRect(barX, barY, barWidth, barHeight, GxEPD_WHITE);
+    }
+
+    // Draw black border around bar
+    display.drawRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+  }
+
+  // Draw X-axis time labels
+  struct tm timeInfo;
+  for (int i = 0; i < rateCount; i++) {
+    if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
+      // Show label every 1 hour on the hour
+      if (timeInfo.tm_min == 0 && timeInfo.tm_hour % 1 == 0) {
+        int labelX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
+        char timeLabel[10];
+        snprintf(timeLabel, sizeof(timeLabel), "%02d:00", timeInfo.tm_hour);
+        display.setCursor(labelX - 10, y + height + 8);
+        display.print(timeLabel);
+      }
+    }
+  }
+}
+
 void clearDisplay() {
   display.setFullWindow();
   display.firstPage();
   do {
     display.fillScreen(GxEPD_WHITE);
   } while (display.nextPage());
+  display.hibernate();
 }
 
 void updateDisplay() {
@@ -331,37 +505,22 @@ void updateDisplay() {
     display.fillScreen(GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
 
-    // Title
-    display.setFont(&FreeMonoBold9pt7b);
-    display.setCursor(10, 25);
-    display.println("Octopus Energy");
+    // Draw price graph maximized (if we have data)
+    // x=35 (room for Y labels), y=5, width=255, height=115
+    if (rateCount > 0) {
+      drawPriceGraph(35, 5, 255, 115);
+    }
 
-    // Draw line
-    display.drawLine(10, 30, 286, 30, GxEPD_BLACK);
-
-    // Price info
-    display.setFont(&FreeSans9pt7b);
-    display.setCursor(10, 60);
-    display.print("Price: ");
-    display.println(currentPrice);
-
-    display.setCursor(10, 90);
-    display.print("Slot: ");
-    display.println(priceWindow);
-
-    display.setCursor(10, 115);
-    display.print("Updated: ");
-    display.println(lastUpdated);
-
-    display.setFont();  // Default small font
-    display.setCursor(10, 122);
+    // Footer
+    display.setFont();
+    display.setCursor(2, 125);
     String footer = "WiFi: " + WiFi.SSID();
     if (statusMessage.length() > 0) {
       footer += " | " + statusMessage;
     } else {
       footer += " | BOOT=Refresh";
     }
-    display.println(footer);
+    display.print(footer);
 
   } while (display.nextPage());
 
@@ -377,7 +536,7 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   // Initialize the display
-  display.init(115200);
+  display.init(115200, true, 2, false);  // Last param false = no border
   display.setRotation(1);
   clearDisplay();
 
