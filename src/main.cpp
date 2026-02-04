@@ -187,10 +187,12 @@ bool fetchCurrentPrice() {
     return false;
   }
 
-  // Get prices for last 3 hours and next 24 hours
-  time_t periodStart = now - 10800;  // 3 hours ago (3 * 3600 seconds)
-  time_t periodEnd = now + 86400;    // 24 hours from now
-  graphStartTime = periodStart;      // Store for axis labels
+  // Get prices for full current day (midnight to midnight)
+  // Calculate seconds since midnight
+  int secondsSinceMidnight = currentInfo.tm_hour * 3600 + currentInfo.tm_min * 60 + currentInfo.tm_sec;
+  time_t periodStart = now - secondsSinceMidnight;  // Start of today (midnight)
+  time_t periodEnd = periodStart + 86400;           // End of today (next midnight)
+  graphStartTime = periodStart;                     // Store for axis labels
 
   struct tm periodStartInfo, periodEndInfo;
   if (!timeToUtcStruct(periodStart, periodStartInfo)) {
@@ -314,7 +316,7 @@ bool fetchCurrentPrice() {
     }
 
     // Compare only first 19 characters (YYYY-MM-DDTHH:MM:SS) to ignore fractional seconds
-    if ((strncmp(validFromCandidate, currentIso, 19) <= 0) && (strncmp(currentIso, validToCandidate, 19) < 0)) {
+    if (!hasSelectedRate && (strncmp(validFromCandidate, currentIso, 19) <= 0) && (strncmp(currentIso, validToCandidate, 19) < 0)) {
       selectedRate = rate;
       hasSelectedRate = true;
       currentRateIndex = rateCount - 1;  // Current rate is the last one we stored
@@ -322,7 +324,7 @@ bool fetchCurrentPrice() {
       Serial.print(validFromCandidate);
       Serial.print(" to ");
       Serial.println(validToCandidate);
-      break;
+      // Don't break - continue storing all rates for full day view
     }
 
     loopIndex++;
@@ -344,10 +346,7 @@ bool fetchCurrentPrice() {
     currentRateIndex = rateCount - 1 - currentRateIndex;
   }
 
-  // Update graphStartTime to use actual data range for better width usage
-  if (rateCount > 0) {
-    graphStartTime = rates[0].validFrom;
-  }
+  // Keep graphStartTime as midnight for full 24-hour day view
 
   JsonObject rateObject;
   if (hasSelectedRate) {
@@ -417,8 +416,8 @@ void drawPriceGraph(int x, int y, int width, int height) {
   }
   double medianPrice = sortedPrices[rateCount / 2];
 
-  // Calculate time range based on actual data (from first to last rate + 30 min slot)
-  time_t timeRange = rates[rateCount - 1].validFrom - graphStartTime + 1800;
+  // Use fixed 24-hour time range (midnight to midnight)
+  time_t timeRange = 86400;  // 24 hours in seconds
 
   // Draw horizontal grid lines at 5p intervals
   display.setFont();
