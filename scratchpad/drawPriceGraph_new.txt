@@ -1,0 +1,16 @@
+void drawPriceGraph(int x, int y, int width, int height) {
+  if (rateCount < 2 || graphStartTime == 0) return;
+
+  // Calculate price statistics
+  PriceStats stats = calculatePriceStats();
+  double priceRange = stats.maxPrice - stats.minPrice;
+
+  // Use fixed 24-hour time range (midnight to midnight)
+  time_t timeRange = SECONDS_PER_DAY;
+
+  // Draw all graph components
+  drawGridLinesAndLabels(x, y, width, height, stats.minPrice, stats.maxPrice, priceRange);
+  drawPriceBars(x, y, width, height, stats.minPrice, priceRange, stats.medianPrice, timeRange);
+  drawTimeLabels(x, y, width, height, timeRange);
+  drawCurrentTimeIndicator(x, y, width, height, timeRange);
+}

@@ -38,6 +38,28 @@ GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custo
 #define OCTOPUS_TARIFF_CODE OCTOPUS_TARIFF_PREFIX OCTOPUS_PRODUCT_CODE "-" OCTOPUS_REGION_CODE
 #endif
 
+// Display layout constants
+const int GRAPH_X = 5;
+const int GRAPH_Y = 5;
+const int GRAPH_WIDTH = 254;
+const int GRAPH_HEIGHT = 110;
+const int DATE_LABEL_X = 13;
+const int DATE_LABEL_Y = 16;
+const int Y_LABEL_OFFSET = 2;
+const int Y_LABEL_VERTICAL_OFFSET = 3;
+const int HOUR_LABEL_X_OFFSET = -3;
+const int HOUR_LABEL_Y_OFFSET = 5;
+
+// Time constants (seconds)
+const time_t SECONDS_PER_DAY = 86400;
+const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
+const time_t HALF_SLOT_DURATION = 900;   // 15 minutes
+
+// Graph display constants
+const double PRICE_GRID_INTERVAL = 5.0;  // Grid line every 5 pence
+const int HOUR_LABEL_INTERVAL = 2;       // Show hour label every 2 hours
+const int MAX_RATES = 60;                // Buffer size for rate data
+
 String currentPrice = "Fetching price...";
 String priceWindow = "Waiting for data...";
 String lastUpdated = "--";
@@ -49,7 +71,7 @@ struct RateData {
   time_t validFrom;
   double price;
 };
-RateData rates[60];  // 27 hours * 2 slots per hour = 54, with some buffer
+RateData rates[MAX_RATES];
 int rateCount = 0;
 int currentRateIndex = -1;
 time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
@@ -166,6 +188,125 @@ time_t parseISOTimestamp(const char* isoTime) {
   return 0;
 }
 
+struct PriceStats {
+  double minPrice;
+  double maxPrice;
+  double medianPrice;
+};
+
+PriceStats calculatePriceStats() {
+  PriceStats stats;
+
+  // Find min/max prices
+  stats.minPrice = rates[0].price;
+  stats.maxPrice = rates[0].price;
+  for (int i = 1; i < rateCount; i++) {
+    if (rates[i].price < stats.minPrice) stats.minPrice = rates[i].price;
+    if (rates[i].price > stats.maxPrice) stats.maxPrice = rates[i].price;
+  }
+
+  // Round to nice values for axis (multiples of 5)
+  stats.minPrice = floor(stats.minPrice / PRICE_GRID_INTERVAL) * PRICE_GRID_INTERVAL;
+  stats.maxPrice = ceil(stats.maxPrice / PRICE_GRID_INTERVAL) * PRICE_GRID_INTERVAL;
+  if (stats.maxPrice - stats.minPrice < 10) {
+    stats.maxPrice = stats.minPrice + 10;
+  }
+
+  // Calculate median price for color threshold
+  double sortedPrices[MAX_RATES];
+  for (int i = 0; i < rateCount; i++) {
+    sortedPrices[i] = rates[i].price;
+  }
+  for (int i = 0; i < rateCount - 1; i++) {
+    for (int j = i + 1; j < rateCount; j++) {
+      if (sortedPrices[i] > sortedPrices[j]) {
+        double temp = sortedPrices[i];
+        sortedPrices[i] = sortedPrices[j];
+        sortedPrices[j] = temp;
+      }
+    }
+  }
+  stats.medianPrice = sortedPrices[rateCount / 2];
+
+  return stats;
+}
+
+void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice, double maxPrice, double priceRange) {
+  display.setFont();
+  for (double price = minPrice; price <= maxPrice; price += PRICE_GRID_INTERVAL) {
+    int gridY = y + height - (int)((price - minPrice) / priceRange * height);
+    display.drawLine(x, gridY, x + width, gridY, GxEPD_BLACK);
+
+    // Draw Y-axis label on the right
+    char label[10];
+    snprintf(label, sizeof(label), "%.1fp", price);
+    display.setCursor(x + width + Y_LABEL_OFFSET, gridY + Y_LABEL_VERTICAL_OFFSET);
+    display.print(label);
+  }
+}
+
+void drawPriceBars(int x, int y, int width, int height, double minPrice, double priceRange, double medianPrice, time_t timeRange) {
+  for (int i = 0; i < rateCount; i++) {
+    // Calculate x position and width based on time
+    int barX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
+    int nextX;
+    if (i < rateCount - 1) {
+      nextX = x + ((rates[i + 1].validFrom - graphStartTime) * width) / timeRange;
+    } else {
+      // For the last bar, use standard 30-minute slot duration
+      nextX = x + ((rates[i].validFrom + RATE_SLOT_DURATION - graphStartTime) * width) / timeRange;
+    }
+    int barWidth = nextX - barX - 1;  // -1 for spacing between bars
+
+    // Calculate bar height
+    int barHeight = (int)((rates[i].price - minPrice) / priceRange * height);
+    int barY = y + height - barHeight;
+
+    // Ensure bar is within bounds
+    barX = constrain(barX, x, x + width);
+    barWidth = constrain(barWidth, 1, width);
+    barY = constrain(barY, y, y + height);
+    barHeight = constrain(barHeight, 0, height);
+
+    // Fill bar based on price
+    if (rates[i].price > medianPrice) {
+      // High price - draw as filled black (expensive)
+      display.fillRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+    } else {
+      // Low price - draw as white with black border (cheaper)
+      display.fillRect(barX, barY, barWidth, barHeight, GxEPD_WHITE);
+    }
+
+    // Draw black border around bar
+    display.drawRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+  }
+}
+
+void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
+  struct tm timeInfo;
+  for (int i = 0; i < rateCount; i++) {
+    if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
+      // Show label at regular hour intervals
+      if (timeInfo.tm_min == 0 && timeInfo.tm_hour % HOUR_LABEL_INTERVAL == 0) {
+        int labelX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
+        char timeLabel[4];
+        snprintf(timeLabel, sizeof(timeLabel), "%d", timeInfo.tm_hour);
+        display.setCursor(labelX + HOUR_LABEL_X_OFFSET, y + height + HOUR_LABEL_Y_OFFSET);
+        display.print(timeLabel);
+      }
+    }
+  }
+}
+
+void drawCurrentTimeIndicator(int x, int y, int width, int height, time_t timeRange) {
+  if (currentRateIndex >= 0 && currentRateIndex < rateCount) {
+    time_t currentSlotStart = rates[currentRateIndex].validFrom;
+    time_t currentSlotMid = currentSlotStart + HALF_SLOT_DURATION;
+    int currentX = x + ((currentSlotMid - graphStartTime) * width) / timeRange;
+    display.drawLine(currentX, y, currentX, y + height, GxEPD_BLACK);
+  }
+}
+
 bool fetchCurrentPrice() {
   if (WiFi.status() != WL_CONNECTED) {
     statusMessage = "WiFi disconnected";
@@ -190,9 +331,9 @@ bool fetchCurrentPrice() {
   // Get prices for full current day (midnight to midnight)
   // Calculate seconds since midnight
   int secondsSinceMidnight = currentInfo.tm_hour * 3600 + currentInfo.tm_min * 60 + currentInfo.tm_sec;
-  time_t periodStart = now - secondsSinceMidnight;  // Start of today (midnight)
-  time_t periodEnd = periodStart + 86400;           // End of today (next midnight)
-  graphStartTime = periodStart;                     // Store for axis labels
+  time_t periodStart = now - secondsSinceMidnight;     // Start of today (midnight)
+  time_t periodEnd = periodStart + SECONDS_PER_DAY;   // End of today (next midnight)
+  graphStartTime = periodStart;                        // Store for axis labels
 
   struct tm periodStartInfo, periodEndInfo;
   if (!timeToUtcStruct(periodStart, periodStartInfo)) {
@@ -293,7 +434,7 @@ bool fetchCurrentPrice() {
   int loopIndex = 0;
   for (JsonObject rate : results) {
     // Store rate data for graphing with actual timestamps
-    if (rateCount < 60) {
+    if (rateCount < MAX_RATES) {
       const char* validFromStr = rate["valid_from"] | "";
       double priceVal = rate["value_inc_vat"] | 0.0;
 
@@ -401,7 +542,7 @@ void drawPriceGraph(int x, int y, int width, int height) {
   double priceRange = maxPrice - minPrice;
 
   // Calculate median price for color threshold
-  double sortedPrices[60];
+  double sortedPrices[MAX_RATES];
   for (int i = 0; i < rateCount; i++) {
     sortedPrices[i] = rates[i].price;
   }
@@ -417,18 +558,18 @@ void drawPriceGraph(int x, int y, int width, int height) {
   double medianPrice = sortedPrices[rateCount / 2];
 
   // Use fixed 24-hour time range (midnight to midnight)
-  time_t timeRange = 86400;  // 24 hours in seconds
+  time_t timeRange = SECONDS_PER_DAY;
 
-  // Draw horizontal grid lines at 5p intervals
+  // Draw horizontal grid lines at regular price intervals
   display.setFont();
-  for (double price = minPrice; price <= maxPrice; price += 5.0) {
+  for (double price = minPrice; price <= maxPrice; price += PRICE_GRID_INTERVAL) {
     int gridY = y + height - (int)((price - minPrice) / priceRange * height);
     display.drawLine(x, gridY, x + width, gridY, GxEPD_BLACK);
 
-    // Draw Y-axis label
+    // Draw Y-axis label on the right
     char label[10];
     snprintf(label, sizeof(label), "%.1fp", price);
-    display.setCursor(2, gridY + 3);
+    display.setCursor(x + width + Y_LABEL_OFFSET, gridY + Y_LABEL_VERTICAL_OFFSET);
     display.print(label);
   }
 
@@ -440,8 +581,8 @@ void drawPriceGraph(int x, int y, int width, int height) {
     if (i < rateCount - 1) {
       nextX = x + ((rates[i + 1].validFrom - graphStartTime) * width) / timeRange;
     } else {
-      // For the last bar, assume 30-minute slot (1800 seconds)
-      nextX = x + ((rates[i].validFrom + 1800 - graphStartTime) * width) / timeRange;
+      // For the last bar, use standard 30-minute slot duration
+      nextX = x + ((rates[i].validFrom + RATE_SLOT_DURATION - graphStartTime) * width) / timeRange;
     }
     int barWidth = nextX - barX - 1;  // -1 for spacing between bars
 
@@ -455,14 +596,13 @@ void drawPriceGraph(int x, int y, int width, int height) {
     barY = constrain(barY, y, y + height);
     barHeight = constrain(barHeight, 0, height);
 
-    // Fill bar with color (green for low, red for high)
+    // Fill bar with color based on price
     // E-paper displays: GxEPD_BLACK for filled, GxEPD_WHITE for outline
-    // We'll use filled rectangles with borders
     if (rates[i].price > medianPrice) {
-      // High price - draw as filled black (will appear dark)
+      // High price - draw as filled black (expensive)
       display.fillRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
     } else {
-      // Low price - draw as white with black border
+      // Low price - draw as white with black border (cheaper)
       display.fillRect(barX, barY, barWidth, barHeight, GxEPD_WHITE);
     }
 
@@ -474,15 +614,23 @@ void drawPriceGraph(int x, int y, int width, int height) {
   struct tm timeInfo;
   for (int i = 0; i < rateCount; i++) {
     if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
-      // Show label every 2 hours on the hour
-      if (timeInfo.tm_min == 0 && timeInfo.tm_hour % 2 == 0) {
+      // Show label at regular hour intervals
+      if (timeInfo.tm_min == 0 && timeInfo.tm_hour % HOUR_LABEL_INTERVAL == 0) {
         int labelX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
         char timeLabel[4];
         snprintf(timeLabel, sizeof(timeLabel), "%d", timeInfo.tm_hour);
-        display.setCursor(labelX - 3, y + height + 5);
+        display.setCursor(labelX + HOUR_LABEL_X_OFFSET, y + height + HOUR_LABEL_Y_OFFSET);
         display.print(timeLabel);
       }
     }
+  }
+
+  // Draw vertical line at current time slot
+  if (currentRateIndex >= 0 && currentRateIndex < rateCount) {
+    time_t currentSlotStart = rates[currentRateIndex].validFrom;
+    time_t currentSlotMid = currentSlotStart + HALF_SLOT_DURATION;
+    int currentX = x + ((currentSlotMid - graphStartTime) * width) / timeRange;
+    display.drawLine(currentX, y, currentX, y + height, GxEPD_BLACK);
   }
 }
 
@@ -504,10 +652,21 @@ void updateDisplay() {
     display.fillScreen(GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
 
-    // Draw price graph with room for time labels at bottom
-    // x=35 (room for Y labels), y=5, width=255, height=110 (leaves room for hour labels)
+    // Draw date label in top left
+    if (graphStartTime > 0) {
+      struct tm dateInfo;
+      if (timeToUtcStruct(graphStartTime, dateInfo)) {
+        char dateLabel[12];
+        strftime(dateLabel, sizeof(dateLabel), "%Y-%m-%d", &dateInfo);
+        display.setFont();  // Small default font
+        display.setCursor(DATE_LABEL_X, DATE_LABEL_Y);
+        display.print(dateLabel);
+      }
+    }
+
+    // Draw price graph with Y-axis labels on right, time labels at bottom
     if (rateCount > 0) {
-      drawPriceGraph(35, 5, 255, 110);
+      drawPriceGraph(GRAPH_X, GRAPH_Y, GRAPH_WIDTH, GRAPH_HEIGHT);
     }
 
   } while (display.nextPage());
