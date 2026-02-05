@@ -41,7 +41,7 @@ GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custo
 // Display layout constants
 const int GRAPH_X = 5;
 const int GRAPH_Y = 5;
-const int GRAPH_WIDTH = 254;
+const int GRAPH_WIDTH = 270;
 const int GRAPH_HEIGHT = 110;
 const int DATE_LABEL_X = 13;
 const int DATE_LABEL_Y = 16;
@@ -268,7 +268,7 @@ void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice
 
     // Draw Y-axis label on the right
     char label[10];
-    snprintf(label, sizeof(label), "%.1fp", price);
+    snprintf(label, sizeof(label), "%.0fp", price);
     display.setCursor(x + width + Y_LABEL_OFFSET, gridY + Y_LABEL_VERTICAL_OFFSET);
     display.print(label);
   }
