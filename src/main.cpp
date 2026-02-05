@@ -54,6 +54,9 @@ const int HOUR_LABEL_Y_OFFSET = 5;
 const time_t SECONDS_PER_DAY = 86400;
 const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
 const time_t HALF_SLOT_DURATION = 900;   // 15 minutes
+const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 minutes
+const unsigned long PRICE_FETCH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL; // 6 hours
+const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // 6 hours
 
 // Graph display constants
 const double PRICE_GRID_INTERVAL = 5.0;  // Grid line every 5 pence
@@ -75,6 +78,10 @@ RateData rates[MAX_RATES];
 int rateCount = 0;
 int currentRateIndex = -1;
 time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
+unsigned long lastDisplayRefreshMs = 0;
+unsigned long lastPriceFetchMs = 0;
+long lastQuarterEpochIndex = -1;
+long lastPriceEpochIndex = -1;
 
 bool waitForTimeSync() {
   time_t now = time(nullptr);
@@ -310,6 +317,26 @@ void drawCurrentTimeSlot(int x, int y, int width, int height, time_t timeRange) 
     for (int yy = y; yy <= y + height; yy += dashLength + gapLength) {
       int yEnd = min(yy + dashLength, y + height);
       display.drawLine(currentX, yy, currentX, yEnd, GxEPD_BLACK);
+    }
+  }
+}
+
+void updateCurrentRateIndexFromNow() {
+  if (rateCount <= 0) return;
+
+  time_t now = time(nullptr);
+  if (now < 1000000000) return;  // time not set
+
+  currentRateIndex = -1;
+  for (int i = 0; i < rateCount; i++) {
+    time_t slotStart = rates[i].validFrom;
+    time_t slotEnd = (i < rateCount - 1)
+        ? rates[i + 1].validFrom
+        : rates[i].validFrom + RATE_SLOT_DURATION;
+
+    if (now >= slotStart && now < slotEnd) {
+      currentRateIndex = i;
+      break;
     }
   }
 }
@@ -636,10 +663,18 @@ void setup() {
 
   // Initial display update
   updateDisplay();
+  lastDisplayRefreshMs = millis();
+  lastPriceFetchMs = millis();
+  time_t now = time(nullptr);
+  if (now >= 1000000000) {
+    lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
+    lastPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
+  }
 }
 
 void loop() {
   bool buttonState = digitalRead(BUTTON_PIN);
+  unsigned long nowMs = millis();
 
   // Detect button press (LOW = pressed on BOOT button)
   if (buttonState == LOW && lastButtonState == HIGH) {
@@ -648,12 +683,61 @@ void loop() {
 
     if (WiFi.status() == WL_CONNECTED) {
       fetchCurrentPrice();
+      updateCurrentRateIndexFromNow();
       updateDisplay();
+      lastPriceFetchMs = nowMs;
+      lastDisplayRefreshMs = nowMs;
+      time_t now = time(nullptr);
+      if (now >= 1000000000) {
+        lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
+        lastPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
+      }
     } else {
       Serial.println("WiFi not connected!");
     }
 
     delay(200); // Prevent multiple triggers
+  }
+
+  // Periodic price refresh aligned to real 6-hour boundaries (fallback to millis if time not set)
+  if (WiFi.status() == WL_CONNECTED) {
+    time_t now = time(nullptr);
+    if (now >= 1000000000) {
+      long currentPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
+      if (currentPriceEpochIndex != lastPriceEpochIndex) {
+        if (fetchCurrentPrice()) {
+          updateCurrentRateIndexFromNow();
+          updateDisplay();
+          lastPriceFetchMs = nowMs;
+          lastDisplayRefreshMs = nowMs;
+          lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
+          lastPriceEpochIndex = currentPriceEpochIndex;
+        }
+      }
+    } else if (nowMs - lastPriceFetchMs >= PRICE_FETCH_INTERVAL_MS) {
+      if (fetchCurrentPrice()) {
+        updateCurrentRateIndexFromNow();
+        updateDisplay();
+        lastPriceFetchMs = nowMs;
+        lastDisplayRefreshMs = nowMs;
+      }
+    }
+  }
+
+  // Periodic display refresh aligned to real quarter-hours (fallback to millis if time not set)
+  time_t now = time(nullptr);
+  if (now >= 1000000000) {
+    long currentQuarterIndex = now / HALF_SLOT_DURATION;
+    if (currentQuarterIndex != lastQuarterEpochIndex) {
+      updateCurrentRateIndexFromNow();
+      updateDisplay();
+      lastDisplayRefreshMs = nowMs;
+      lastQuarterEpochIndex = currentQuarterIndex;
+    }
+  } else if (nowMs - lastDisplayRefreshMs >= DISPLAY_REFRESH_INTERVAL_MS) {
+    updateCurrentRateIndexFromNow();
+    updateDisplay();
+    lastDisplayRefreshMs = nowMs;
   }
 
   lastButtonState = buttonState;
