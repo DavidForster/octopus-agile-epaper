@@ -264,7 +264,13 @@ void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice
   display.setFont();
   for (double price = minPrice; price <= maxPrice; price += PRICE_GRID_INTERVAL) {
     int gridY = y + height - (int)((price - minPrice) / priceRange * height);
-    display.drawLine(x, gridY, x + width, gridY, GxEPD_BLACK);
+    // Dashed horizontal grid line (lighter appearance)
+    const int dashLength = 2;
+    const int gapLength = 5;
+    for (int xx = x; xx <= x + width; xx += dashLength + gapLength) {
+      int xEnd = min(xx + dashLength, x + width);
+      display.drawLine(xx, gridY, xEnd, gridY, GxEPD_BLACK);
+    }
 
     // Draw Y-axis label on the right
     char label[10];
@@ -333,13 +339,8 @@ void drawCurrentTimeSlot(int x, int y, int width, int height, time_t timeRange) 
     time_t currentSlotMid = currentSlotStart + HALF_SLOT_DURATION;
     int currentX = x + ((currentSlotMid - graphStartTime) * width) / timeRange;
 
-    // Dashed vertical line to indicate current slot.
-    const int dashLength = 4;
-    const int gapLength = 3;
-    for (int yy = y; yy <= y + height; yy += dashLength + gapLength) {
-      int yEnd = min(yy + dashLength, y + height);
-      display.drawLine(currentX, yy, currentX, yEnd, GxEPD_BLACK);
-    }
+    // Solid vertical line to indicate current slot.
+    display.drawLine(currentX, y, currentX, y + height, GxEPD_BLACK);
   }
 }
 
