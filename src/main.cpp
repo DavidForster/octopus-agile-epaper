@@ -83,6 +83,25 @@ unsigned long lastPriceFetchMs = 0;
 long lastQuarterEpochIndex = -1;
 long lastPriceEpochIndex = -1;
 
+bool timeToUtcStruct(time_t timestamp, struct tm& out);
+
+void logWithTimestamp(const char* message) {
+  time_t now = time(nullptr);
+  if (now >= 1000000000) {
+    struct tm info;
+    if (timeToUtcStruct(now, info)) {
+      char ts[25];
+      strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &info);
+      Serial.print("[");
+      Serial.print(ts);
+      Serial.print("] ");
+      Serial.println(message);
+      return;
+    }
+  }
+  Serial.println(message);
+}
+
 bool waitForTimeSync() {
   time_t now = time(nullptr);
   int attempts = 0;
@@ -93,12 +112,12 @@ bool waitForTimeSync() {
   }
 
   if (now < 1000000000) {
-    Serial.println("Unable to get valid time from NTP.");
+    logWithTimestamp("Unable to get valid time from NTP.");
     statusMessage = "Time sync failed";
     return false;
   }
 
-  Serial.println("Time synchronized.");
+  logWithTimestamp("Time synchronized via NTP.");
   return true;
 }
 
@@ -109,7 +128,7 @@ bool syncTimeFromHttp() {
 
   HTTPClient http;
   if (!http.begin(client, timeUrl)) {
-    Serial.println("Failed to init HTTP client for time API.");
+    logWithTimestamp("Failed to init HTTP client for time API.");
     statusMessage = "Time API init failed";
     return false;
   }
@@ -118,6 +137,7 @@ bool syncTimeFromHttp() {
   if (httpCode != HTTP_CODE_OK) {
     Serial.print("Time API HTTP Error: ");
     Serial.println(httpCode);
+    logWithTimestamp("Time API HTTP error.");
     statusMessage = "Time API error";
     http.end();
     return false;
@@ -129,13 +149,14 @@ bool syncTimeFromHttp() {
   if (error) {
     Serial.print("Time JSON parse failed: ");
     Serial.println(error.f_str());
+    logWithTimestamp("Time JSON parse failed.");
     statusMessage = "Time parse error";
     return false;
   }
 
   long unixTime = timeDoc["unixtime"] | 0;
   if (unixTime <= 0) {
-    Serial.println("Invalid time received from API.");
+    logWithTimestamp("Invalid time received from API.");
     statusMessage = "Invalid time";
     return false;
   }
@@ -146,6 +167,7 @@ bool syncTimeFromHttp() {
   settimeofday(&tv, nullptr);
   Serial.print("Time synced via HTTP API: ");
   Serial.println(unixTime);
+  logWithTimestamp("Time synchronized via HTTP.");
 
   return waitForTimeSync();
 }
@@ -344,12 +366,14 @@ void updateCurrentRateIndexFromNow() {
 bool fetchCurrentPrice() {
   if (WiFi.status() != WL_CONNECTED) {
     statusMessage = "WiFi disconnected";
+    logWithTimestamp("Price fetch skipped: WiFi disconnected.");
     return false;
   }
 
+  logWithTimestamp("Price fetch start.");
   time_t now = time(nullptr);
   if (now < 1000000000) {
-    Serial.println("Time not set - attempting to sync again.");
+    logWithTimestamp("Time not set - attempting to sync again.");
     if (!waitForTimeSync() && !syncTimeFromHttp()) {
       return false;
     }
@@ -359,6 +383,7 @@ bool fetchCurrentPrice() {
   struct tm currentInfo;
   if (!timeToUtcStruct(now, currentInfo)) {
     statusMessage = "Time convert failed";
+    logWithTimestamp("Time conversion failed.");
     return false;
   }
 
@@ -397,13 +422,14 @@ bool fetchCurrentPrice() {
 
   Serial.print("Requesting rate: ");
   Serial.println(url);
+  logWithTimestamp("Price fetch HTTP request created.");
 
   WiFiClientSecure client;
   client.setInsecure();  // Octopus Energy uses a trusted certificate; skip CA check for simplicity
 
   HTTPClient http;
   if (!http.begin(client, url)) {
-    Serial.println("Failed to initialize HTTP client.");
+    logWithTimestamp("Failed to initialize HTTP client.");
     statusMessage = "HTTP init failed";
     return false;
   }
@@ -412,6 +438,7 @@ bool fetchCurrentPrice() {
   if (httpCode != HTTP_CODE_OK) {
     Serial.print("HTTP Error: ");
     Serial.println(httpCode);
+    logWithTimestamp("Price fetch HTTP error.");
     statusMessage = "HTTP error " + String(httpCode);
     http.end();
     return false;
@@ -425,13 +452,14 @@ bool fetchCurrentPrice() {
   if (error) {
     Serial.print("JSON parse failed: ");
     Serial.println(error.f_str());
+    logWithTimestamp("Price JSON parse failed.");
     statusMessage = "JSON parse error";
     return false;
   }
 
   JsonArray results = doc["results"];
   if (!results || results.size() == 0) {
-    Serial.println("No rate data returned.");
+    logWithTimestamp("No rate data returned.");
     statusMessage = "No rate data";
     return false;
   }
@@ -509,6 +537,7 @@ bool fetchCurrentPrice() {
   Serial.print(rateCount);
   Serial.print(" rates for graphing, current index: ");
   Serial.println(currentRateIndex);
+  logWithTimestamp("Rates stored and indexed.");
 
   // Reverse the rates array to get chronological order (API returns newest first)
   for (int i = 0; i < rateCount / 2; i++) {
@@ -531,7 +560,7 @@ bool fetchCurrentPrice() {
     rateObject = fallbackRate;
     statusMessage = "Showing next slot";
   } else {
-    Serial.println("No rate data returned.");
+    logWithTimestamp("No rate data returned after processing.");
     statusMessage = "No rate data";
     return false;
   }
@@ -541,7 +570,7 @@ bool fetchCurrentPrice() {
   const char* validTo = rateObject["valid_to"] | "";
 
   if (priceValue < 0) {
-    Serial.println("Invalid price value.");
+    logWithTimestamp("Invalid price value.");
     statusMessage = "Invalid price";
     return false;
   }
@@ -554,6 +583,7 @@ bool fetchCurrentPrice() {
   Serial.println(currentPrice);
   Serial.print("Valid window: ");
   Serial.println(priceWindow);
+  logWithTimestamp("Price fetch complete.");
 
   return true;
 }
@@ -585,7 +615,7 @@ void clearDisplay() {
 }
 
 void updateDisplay() {
-  Serial.println("Updating display...");
+  logWithTimestamp("Display update start.");
 
   display.setFullWindow();
   display.firstPage();
@@ -607,18 +637,20 @@ void updateDisplay() {
 
     // Draw price graph with Y-axis labels on right, time labels at bottom
     if (rateCount > 0) {
+      logWithTimestamp("Graph render start.");
       drawPriceGraph(GRAPH_X, GRAPH_Y, GRAPH_WIDTH, GRAPH_HEIGHT);
+      logWithTimestamp("Graph render complete.");
     }
 
   } while (display.nextPage());
 
-  Serial.println("Display update complete!");
+  logWithTimestamp("Display update complete.");
   display.hibernate();
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32 Octopus Price Display");
+  logWithTimestamp("ESP32 Octopus Price Display starting.");
 
   // Setup button pin
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -630,7 +662,7 @@ void setup() {
   // Display will be updated with content immediately after data fetch
 
   // Connect to WiFi
-  Serial.print("Connecting to WiFi");
+  logWithTimestamp("Connecting to WiFi...");
   WiFi.begin(ssid, password);
 
   int attempts = 0;
@@ -644,8 +676,10 @@ void setup() {
     Serial.println("\nWiFi connected!");
     Serial.print("Local IP: ");
     Serial.println(WiFi.localIP());
+    logWithTimestamp("WiFi connected.");
 
     configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+    logWithTimestamp("Time sync starting.");
     if (!waitForTimeSync()) {
       syncTimeFromHttp();
     }
@@ -657,6 +691,7 @@ void setup() {
     }
   } else {
     Serial.println("\nWiFi connection failed!");
+    logWithTimestamp("WiFi connection failed.");
     currentPrice = "WiFi Failed";
     priceWindow = "--";
   }
@@ -669,6 +704,7 @@ void setup() {
   if (now >= 1000000000) {
     lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
     lastPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
+    logWithTimestamp("Polling alignment initialized.");
   }
 }
 
@@ -678,7 +714,7 @@ void loop() {
 
   // Detect button press (LOW = pressed on BOOT button)
   if (buttonState == LOW && lastButtonState == HIGH) {
-    Serial.println("Button pressed!");
+    logWithTimestamp("Button pressed.");
     delay(50); // Debounce
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -693,7 +729,7 @@ void loop() {
         lastPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
       }
     } else {
-      Serial.println("WiFi not connected!");
+      logWithTimestamp("WiFi not connected (button press).");
     }
 
     delay(200); // Prevent multiple triggers
@@ -705,6 +741,7 @@ void loop() {
     if (now >= 1000000000) {
       long currentPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
       if (currentPriceEpochIndex != lastPriceEpochIndex) {
+        logWithTimestamp("6-hour boundary reached. Fetching prices.");
         if (fetchCurrentPrice()) {
           updateCurrentRateIndexFromNow();
           updateDisplay();
@@ -715,6 +752,7 @@ void loop() {
         }
       }
     } else if (nowMs - lastPriceFetchMs >= PRICE_FETCH_INTERVAL_MS) {
+      logWithTimestamp("6-hour fetch interval elapsed (millis fallback).");
       if (fetchCurrentPrice()) {
         updateCurrentRateIndexFromNow();
         updateDisplay();
@@ -729,12 +767,14 @@ void loop() {
   if (now >= 1000000000) {
     long currentQuarterIndex = now / HALF_SLOT_DURATION;
     if (currentQuarterIndex != lastQuarterEpochIndex) {
+      logWithTimestamp("Quarter-hour boundary reached. Refreshing display.");
       updateCurrentRateIndexFromNow();
       updateDisplay();
       lastDisplayRefreshMs = nowMs;
       lastQuarterEpochIndex = currentQuarterIndex;
     }
   } else if (nowMs - lastDisplayRefreshMs >= DISPLAY_REFRESH_INTERVAL_MS) {
+    logWithTimestamp("15-minute refresh interval elapsed (millis fallback).");
     updateCurrentRateIndexFromNow();
     updateDisplay();
     lastDisplayRefreshMs = nowMs;
