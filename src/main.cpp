@@ -298,12 +298,19 @@ void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
   }
 }
 
-void drawCurrentTimeIndicator(int x, int y, int width, int height, time_t timeRange) {
+void drawCurrentTimeSlot(int x, int y, int width, int height, time_t timeRange) {
   if (currentRateIndex >= 0 && currentRateIndex < rateCount) {
     time_t currentSlotStart = rates[currentRateIndex].validFrom;
     time_t currentSlotMid = currentSlotStart + HALF_SLOT_DURATION;
     int currentX = x + ((currentSlotMid - graphStartTime) * width) / timeRange;
-    display.drawLine(currentX, y, currentX, y + height, GxEPD_BLACK);
+
+    // Dashed vertical line to indicate current slot.
+    const int dashLength = 4;
+    const int gapLength = 3;
+    for (int yy = y; yy <= y + height; yy += dashLength + gapLength) {
+      int yEnd = min(yy + dashLength, y + height);
+      display.drawLine(currentX, yy, currentX, yEnd, GxEPD_BLACK);
+    }
   }
 }
 
@@ -536,9 +543,9 @@ void drawPriceGraph(int x, int y, int width, int height) {
 
   // Draw all graph components
   drawGridLinesAndLabels(x, y, width, height, stats.minPrice, stats.maxPrice, priceRange);
+  drawCurrentTimeSlot(x, y, width, height, timeRange);
   drawPriceBars(x, y, width, height, stats.minPrice, priceRange, stats.medianPrice, timeRange);
   drawTimeLabels(x, y, width, height, timeRange);
-  drawCurrentTimeIndicator(x, y, width, height, timeRange);
 }
 
 void clearDisplay() {
