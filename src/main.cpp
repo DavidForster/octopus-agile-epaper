@@ -86,15 +86,15 @@ String priceWindow = "Waiting for data...";
 String lastUpdated = "--";
 String statusMessage = "";
 
-// Store rate data for graphing
+// Store rate data for graphing (in RTC memory to persist across deep sleep)
 struct RateData {
   time_t validFrom;
   double price;
 };
-RateData rates[MAX_RATES];
-int rateCount = 0;
-int currentRateIndex = -1;
-time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
+RTC_DATA_ATTR RateData rates[MAX_RATES];
+RTC_DATA_ATTR int rateCount = 0;
+RTC_DATA_ATTR int currentRateIndex = -1;
+RTC_DATA_ATTR time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
 
 bool timeToUtcStruct(time_t timestamp, struct tm& out);
 
