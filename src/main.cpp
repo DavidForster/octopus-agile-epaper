@@ -53,7 +53,7 @@ const int DATE_LABEL_X = 13;                // Date label X position (top left)
 const int DATE_LABEL_Y = 16;                // Date label Y position (top left)
 const int Y_LABEL_OFFSET = 2;               // Gap between graph and price labels (right side)
 const int Y_LABEL_VERTICAL_OFFSET = -3;     // Vertical adjustment for price labels (adjust to align with grid lines)
-const int HOUR_LABEL_X_OFFSET = -3;         // Horizontal adjustment for hour labels (bottom)
+const int HOUR_LABEL_CENTER_OFFSET = 1;     // Fine-tune horizontal centering of hour labels (adjust to align with bars)
 const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels (bottom)
 
 // Time constants (seconds)
@@ -331,13 +331,22 @@ void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
     if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
       // Show label at regular hour intervals
       if (timeInfo.tm_min == 0 && timeInfo.tm_hour % HOUR_LABEL_INTERVAL == 0) {
-        // Calculate center of the slot for label positioning
+        // Calculate center of the bar (not slot) for proper alignment
         int slotStartX = x + (i * SLOT_WIDTH);
-        int labelX = slotStartX + (SLOT_WIDTH / 2);
+        int barX = slotStartX + (BAR_GAP / 2);
+        int barCenterX = barX + (BAR_WIDTH / 2);
+
+        // Draw alignment notch at bar center
+        display.drawLine(barCenterX, y + height, barCenterX, y + height + 2, GxEPD_BLACK);
 
         char timeLabel[4];
         snprintf(timeLabel, sizeof(timeLabel), "%d", timeInfo.tm_hour);
-        display.setCursor(labelX + HOUR_LABEL_X_OFFSET, y + height + HOUR_LABEL_Y_OFFSET);
+
+        // Center the text by calculating its width (default font is 6px per character)
+        int textWidth = strlen(timeLabel) * 6;
+        int centeredX = barCenterX - (textWidth / 2) + HOUR_LABEL_CENTER_OFFSET;
+
+        display.setCursor(centeredX, y + height + HOUR_LABEL_Y_OFFSET);
         display.print(timeLabel);
       }
     }
