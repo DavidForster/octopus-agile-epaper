@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <cstring>
 #include "credentials.h"  // WiFi credentials
+#include <esp_sleep.h>
 
 // Pin definitions for ESP32 SPI connection
 #define EPD_CS    5
@@ -51,7 +52,7 @@ const int GRAPH_HEIGHT = 110;       // Graph height in pixels
 const int DATE_LABEL_X = 13;                // Date label X position (top left)
 const int DATE_LABEL_Y = 16;                // Date label Y position (top left)
 const int Y_LABEL_OFFSET = 2;               // Gap between graph and price labels (right side)
-const int Y_LABEL_VERTICAL_OFFSET = 3;      // Vertical adjustment for price labels
+const int Y_LABEL_VERTICAL_OFFSET = -3;     // Vertical adjustment for price labels (adjust to align with grid lines)
 const int HOUR_LABEL_X_OFFSET = -3;         // Horizontal adjustment for hour labels (bottom)
 const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels (bottom)
 
@@ -59,9 +60,12 @@ const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels
 const time_t SECONDS_PER_DAY = 86400;
 const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
 const time_t HALF_SLOT_DURATION = 900;   // 15 minutes
-const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 minutes
-const unsigned long PRICE_FETCH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL; // 6 hours
-const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // 6 hours
+const time_t WAKE_INTERVAL_S = 900;      // Wake every 15 minutes (quarter-hour)
+const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // Fetch prices every 6 hours
+
+// RTC memory variables (persist across deep sleep)
+RTC_DATA_ATTR time_t rtcLastPriceFetch = 0;
+RTC_DATA_ATTR int rtcBootCount = 0;
 
 // Graph display constants
 const double PRICE_GRID_INTERVAL = 5.0;                   // Grid line every 5 pence
@@ -81,7 +85,6 @@ String currentPrice = "Fetching price...";
 String priceWindow = "Waiting for data...";
 String lastUpdated = "--";
 String statusMessage = "";
-bool lastButtonState = HIGH;
 
 // Store rate data for graphing
 struct RateData {
@@ -92,10 +95,6 @@ RateData rates[MAX_RATES];
 int rateCount = 0;
 int currentRateIndex = -1;
 time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
-unsigned long lastDisplayRefreshMs = 0;
-unsigned long lastPriceFetchMs = 0;
-long lastQuarterEpochIndex = -1;
-long lastPriceEpochIndex = -1;
 
 bool timeToUtcStruct(time_t timestamp, struct tm& out);
 
@@ -619,6 +618,20 @@ void drawPriceGraph(int x, int y, int width, int height) {
   drawTimeLabels(x, y, width, height, timeRange);
 }
 
+void enterDeepSleep(time_t sleepSeconds) {
+  logWithTimestamp("Disconnecting WiFi.");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+
+  Serial.print("Entering deep sleep for ");
+  Serial.print(sleepSeconds);
+  Serial.println(" seconds");
+  Serial.flush();  // Ensure serial output completes
+
+  esp_sleep_enable_timer_wakeup(sleepSeconds * 1000000ULL);  // Convert to microseconds
+  esp_deep_sleep_start();
+}
+
 void clearDisplay() {
   display.setFullWindow();
   display.firstPage();
@@ -664,19 +677,23 @@ void updateDisplay() {
 
 void setup() {
   Serial.begin(115200);
+  delay(100);  // Allow serial to initialize
+
+  // Increment boot counter
+  rtcBootCount++;
+  Serial.print("Boot #");
+  Serial.print(rtcBootCount);
+  Serial.print(" - Wake reason: ");
+  Serial.println(esp_sleep_get_wakeup_cause());
   logWithTimestamp("ESP32 Octopus Price Display starting.");
 
-  // Setup button pin
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  // Initialize the display
-  display.init(115200, true, 2, false);  // Last param false = no border
+  // Initialize the display (but don't update on first boot - shows stale screen)
+  display.init(115200, true, 2, false);
   display.setRotation(1);
-  // Skip initial clearDisplay() to avoid timeout with custom driver
-  // Display will be updated with content immediately after data fetch
 
   // Connect to WiFi
   logWithTimestamp("Connecting to WiFi...");
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
   int attempts = 0;
@@ -686,114 +703,84 @@ void setup() {
     attempts++;
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected!");
-    Serial.print("Local IP: ");
-    Serial.println(WiFi.localIP());
-    logWithTimestamp("WiFi connected.");
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nWiFi connection failed!");
+    logWithTimestamp("WiFi connection failed.");
+    // Sleep and try again later
+    enterDeepSleep(WAKE_INTERVAL_S);
+    return;
+  }
 
+  Serial.println("\nWiFi connected!");
+  logWithTimestamp("WiFi connected.");
+
+  // Sync time on first boot or if time not set
+  time_t now = time(nullptr);
+  if (rtcBootCount == 1 || now < 1000000000) {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
     logWithTimestamp("Time sync starting.");
     if (!waitForTimeSync()) {
       syncTimeFromHttp();
     }
-
-    // Get initial price info
-    if (!fetchCurrentPrice()) {
-      currentPrice = "Unable to fetch";
-      priceWindow = "Check tariff settings";
-    }
-  } else {
-    Serial.println("\nWiFi connection failed!");
-    logWithTimestamp("WiFi connection failed.");
-    currentPrice = "WiFi Failed";
-    priceWindow = "--";
+    now = time(nullptr);
   }
 
-  // Initial display update
-  updateDisplay();
-  lastDisplayRefreshMs = millis();
-  lastPriceFetchMs = millis();
-  time_t now = time(nullptr);
+  // Determine if we need to fetch prices (every 6 hours or on first boot)
+  bool shouldFetchPrices = false;
+  if (rtcBootCount == 1) {
+    shouldFetchPrices = true;
+    logWithTimestamp("First boot - fetching prices.");
+  } else if (now >= 1000000000 && rtcLastPriceFetch > 0) {
+    time_t timeSinceLastFetch = now - rtcLastPriceFetch;
+    if (timeSinceLastFetch >= PRICE_FETCH_INTERVAL_S) {
+      shouldFetchPrices = true;
+      logWithTimestamp("6 hours elapsed - fetching prices.");
+    }
+  }
+
+  // Fetch prices if needed
+  if (shouldFetchPrices) {
+    if (fetchCurrentPrice()) {
+      rtcLastPriceFetch = now;
+    }
+  }
+
+  // Update current rate index based on current time
+  updateCurrentRateIndexFromNow();
+
+  // Update display if we have rate data
+  if (rateCount > 0) {
+    logWithTimestamp("Updating display.");
+    updateDisplay();
+  } else {
+    logWithTimestamp("No rate data - skipping display update.");
+  }
+
+  // Calculate time until next quarter-hour boundary
+  now = time(nullptr);
   if (now >= 1000000000) {
-    lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
-    lastPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
-    logWithTimestamp("Polling alignment initialized.");
+    time_t secondsIntoQuarter = now % WAKE_INTERVAL_S;
+    time_t sleepSeconds = WAKE_INTERVAL_S - secondsIntoQuarter;
+
+    // Add a small buffer to ensure we're past the boundary
+    sleepSeconds += 5;
+
+    logWithTimestamp("Entering deep sleep mode.");
+    enterDeepSleep(sleepSeconds);
+  } else {
+    // Fallback if time sync failed
+    logWithTimestamp("Time not set - sleeping for default interval.");
+    enterDeepSleep(WAKE_INTERVAL_S);
   }
 }
 
 void loop() {
-  bool buttonState = digitalRead(BUTTON_PIN);
-  unsigned long nowMs = millis();
+  // With deep sleep mode, this loop is not used - setup() handles everything
+  // and then enters deep sleep. The device wakes, runs setup() again, and sleeps.
+  //
+  // The BOOT button naturally resets the ESP32, so pressing it will restart
+  // the device and run setup() again.
 
-  // Detect button press (LOW = pressed on BOOT button)
-  if (buttonState == LOW && lastButtonState == HIGH) {
-    logWithTimestamp("Button pressed.");
-    delay(50); // Debounce
-
-    if (WiFi.status() == WL_CONNECTED) {
-      fetchCurrentPrice();
-      updateCurrentRateIndexFromNow();
-      updateDisplay();
-      lastPriceFetchMs = nowMs;
-      lastDisplayRefreshMs = nowMs;
-      time_t now = time(nullptr);
-      if (now >= 1000000000) {
-        lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
-        lastPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
-      }
-    } else {
-      logWithTimestamp("WiFi not connected (button press).");
-    }
-
-    delay(200); // Prevent multiple triggers
-  }
-
-  // Periodic price refresh aligned to real 6-hour boundaries (fallback to millis if time not set)
-  if (WiFi.status() == WL_CONNECTED) {
-    time_t now = time(nullptr);
-    if (now >= 1000000000) {
-      long currentPriceEpochIndex = now / PRICE_FETCH_INTERVAL_S;
-      if (currentPriceEpochIndex != lastPriceEpochIndex) {
-        logWithTimestamp("6-hour boundary reached. Fetching prices.");
-        if (fetchCurrentPrice()) {
-          updateCurrentRateIndexFromNow();
-          updateDisplay();
-          lastPriceFetchMs = nowMs;
-          lastDisplayRefreshMs = nowMs;
-          lastQuarterEpochIndex = now / HALF_SLOT_DURATION;
-          lastPriceEpochIndex = currentPriceEpochIndex;
-        }
-      }
-    } else if (nowMs - lastPriceFetchMs >= PRICE_FETCH_INTERVAL_MS) {
-      logWithTimestamp("6-hour fetch interval elapsed (millis fallback).");
-      if (fetchCurrentPrice()) {
-        updateCurrentRateIndexFromNow();
-        updateDisplay();
-        lastPriceFetchMs = nowMs;
-        lastDisplayRefreshMs = nowMs;
-      }
-    }
-  }
-
-  // Periodic display refresh aligned to real quarter-hours (fallback to millis if time not set)
-  time_t now = time(nullptr);
-  if (now >= 1000000000) {
-    long currentQuarterIndex = now / HALF_SLOT_DURATION;
-    if (currentQuarterIndex != lastQuarterEpochIndex) {
-      logWithTimestamp("Quarter-hour boundary reached. Refreshing display.");
-      updateCurrentRateIndexFromNow();
-      updateDisplay();
-      lastDisplayRefreshMs = nowMs;
-      lastQuarterEpochIndex = currentQuarterIndex;
-    }
-  } else if (nowMs - lastDisplayRefreshMs >= DISPLAY_REFRESH_INTERVAL_MS) {
-    logWithTimestamp("15-minute refresh interval elapsed (millis fallback).");
-    updateCurrentRateIndexFromNow();
-    updateDisplay();
-    lastDisplayRefreshMs = nowMs;
-  }
-
-  lastButtonState = buttonState;
-  delay(10);
+  // If we somehow end up here, just sleep
+  delay(1000);
 }
