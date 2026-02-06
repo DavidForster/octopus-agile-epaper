@@ -668,18 +668,6 @@ void updateDisplay() {
     display.fillScreen(GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
 
-    // Draw date label in top left
-    if (graphStartTime > 0) {
-      struct tm dateInfo;
-      if (timeToUtcStruct(graphStartTime, dateInfo)) {
-        char dateLabel[12];
-        strftime(dateLabel, sizeof(dateLabel), "%Y-%m-%d", &dateInfo);
-        display.setFont();  // Small default font
-        display.setCursor(DATE_LABEL_X, DATE_LABEL_Y);
-        display.print(dateLabel);
-      }
-    }
-
     // Draw price graph with Y-axis labels on right, time labels at bottom
     if (rateCount > 0) {
       logWithTimestamp("Graph render start.");
