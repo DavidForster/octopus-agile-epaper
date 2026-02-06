@@ -1,14 +1,10 @@
-// Display Library for SPI e-paper panels from Dalian Good Display and boards from Waveshare.
-// Requires HW SPI and Adafruit_GFX. Caution: these e-papers require 3.3V supply AND data lines!
+// Custom driver for Waveshare 2.9" e-paper display - see GxEPD2_290_Custom.h for details.
 //
-// based on Demo Example from Good Display: http://www.e-paper-display.com/download_list/downloadcategoryid=34&isMode=false.html
-// Controller: IL3820 : http://www.e-paper-display.com/download_detail/downloadsId=540.html
+// The only functional change from the standard GxEPD2_290 is in _Update_Full():
+// _writeData(0xc4) instead of _writeData(0xc7) to avoid busy-wait timeouts.
 //
-// Author: Jean-Marc Zingg
-//
-// Version: see library.properties
-//
-// Library: https://github.com/ZinggJM/GxEPD2
+// Original author: Jean-Marc Zingg
+// Original library: https://github.com/ZinggJM/GxEPD2
 
 #include "GxEPD2_290_Custom.h"
 
@@ -380,7 +376,7 @@ void GxEPD2_290_Custom::_Init_Part()
 void GxEPD2_290_Custom::_Update_Full()
 {
   _writeCommand(0x22);
-  _writeData(0xc4); // Keep original value - 0xc7 causes timeouts
+  _writeData(0xc4); // 0xc4 instead of standard 0xc7 (see header for details)
   _writeCommand(0x20);
   _waitWhileBusy("_Update_Full", full_refresh_time);
   _writeCommand(0xff);

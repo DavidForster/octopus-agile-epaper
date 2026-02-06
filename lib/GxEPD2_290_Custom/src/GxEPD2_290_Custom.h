@@ -1,14 +1,19 @@
-// Display Library for SPI e-paper panels from Dalian Good Display and boards from Waveshare.
-// Requires HW SPI and Adafruit_GFX. Caution: these e-papers require 3.3V supply AND data lines!
+// Custom driver for Waveshare 2.9" e-paper display (GDEH029A1 / IL3820 controller).
 //
-// based on Demo Example from Good Display: http://www.e-paper-display.com/download_list/downloadcategoryid=34&isMode=false.html
+// This is a copy of GxEPD2_290 from the GxEPD2 library with a single modification:
+// in _Update_Full(), the display update command byte is changed from 0xc7 to 0xc4.
+// The standard 0xc7 value causes busy-wait timeouts on this specific hardware,
+// while 0xc4 works reliably.
+//
+// A full copy is necessary because _Update_Full() is a private, non-virtual method
+// in the base GxEPD2_290 class, so it cannot be overridden via inheritance.
+//
+// The GxEPD2 library dependency is still required: this class inherits from GxEPD2_EPD,
+// and main.cpp uses the GxEPD2_BW template wrapper from the library.
+//
+// Original author: Jean-Marc Zingg
+// Original library: https://github.com/ZinggJM/GxEPD2
 // Controller: IL3820 : http://www.e-paper-display.com/download_detail/downloadsId=540.html
-//
-// Author: Jean-Marc Zingg
-//
-// Version: see library.properties
-//
-// Library: https://github.com/ZinggJM/GxEPD2
 
 #ifndef _GxEPD2_290_CUSTOM_H_
 #define _GxEPD2_290_CUSTOM_H_
