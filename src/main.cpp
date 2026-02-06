@@ -327,8 +327,10 @@ void drawPriceBars(int x, int y, int width, int height, double minPrice, double 
       display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_WHITE);
     }
 
-    // Draw black border around bar
-    display.drawRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_BLACK);
+    // Draw black border on three sides (left, right, top - no bottom as bars sit on baseline)
+    display.drawLine(barX, barY, barX, barY + barHeight - 1, GxEPD_BLACK);              // Left edge
+    display.drawLine(barX + BAR_WIDTH - 1, barY, barX + BAR_WIDTH - 1, barY + barHeight - 1, GxEPD_BLACK);  // Right edge
+    display.drawLine(barX, barY, barX + BAR_WIDTH - 1, barY, GxEPD_BLACK);              // Top edge
   }
 }
 
