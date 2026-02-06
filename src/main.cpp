@@ -49,12 +49,13 @@ const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels
 // Time constants (seconds)
 const time_t SECONDS_PER_DAY = 86400;
 const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
-const time_t HALF_SLOT_DURATION = 900;   // 15 minutes
 const time_t WAKE_INTERVAL_S = 900;      // Wake every 15 minutes (quarter-hour)
 const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // Fetch prices every 6 hours
+const time_t TIME_SYNC_INTERVAL_S = 24 * 60 * 60;  // Re-sync time every 24 hours
 
 // RTC memory variables (persist across deep sleep)
 RTC_DATA_ATTR time_t rtcLastPriceFetch = 0;
+RTC_DATA_ATTR time_t rtcLastTimeSync = 0;
 RTC_DATA_ATTR int rtcBootCount = 0;
 
 // Graph display constants
@@ -269,7 +270,7 @@ void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice
   }
 }
 
-void drawPriceBars(int x, int y, int width, int height, double minPrice, double priceRange, double medianPrice, time_t timeRange) {
+void drawPriceBars(int x, int y, int width, int height, double minPrice, double priceRange, double medianPrice) {
   for (int i = 0; i < rateCount; i++) {
     // Calculate slot position (each slot is SLOT_WIDTH pixels)
     int slotStartX = x + (i * SLOT_WIDTH);
@@ -303,7 +304,7 @@ void drawPriceBars(int x, int y, int width, int height, double minPrice, double 
   }
 }
 
-void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
+void drawTimeLabels(int x, int y, int width, int height) {
   struct tm timeInfo;
   for (int i = 0; i < rateCount; i++) {
     if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
@@ -331,7 +332,7 @@ void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
   }
 }
 
-void drawCurrentTimeSlot(int x, int y, int width, int height, time_t timeRange) {
+void drawCurrentTimeSlot(int x, int y, int width, int height) {
   if (currentRateIndex >= 0 && currentRateIndex < rateCount) {
     // Calculate the center of the current slot's bar
     int slotStartX = x + (currentRateIndex * SLOT_WIDTH);
@@ -462,74 +463,25 @@ bool fetchCurrentPrice() {
   Serial.print("Current time (UTC): ");
   Serial.println(currentIso);
 
-  // Debug: Print first 3 rates to see what we're getting
-  Serial.println("First 3 rates from API:");
-  for (int i = 0; i < 3 && i < results.size(); i++) {
-    JsonObject rate = results[i];
-    Serial.print("  ");
-    Serial.print(i);
-    Serial.print(": ");
-    Serial.print(rate["valid_from"].as<const char*>());
-    Serial.print(" to ");
-    Serial.print(rate["valid_to"].as<const char*>());
-    Serial.print(" = ");
-    Serial.print(rate["value_inc_vat"].as<double>());
-    Serial.println(" p");
-  }
-
-  // Store all rates for graphing and find current rate
-  JsonObject selectedRate;
-  bool hasSelectedRate = false;
-  JsonObject fallbackRate;
-  bool hasFallbackRate = false;
+  // Store all rates for graphing
   rateCount = 0;
-  currentRateIndex = -1;
-
-  int loopIndex = 0;
   for (JsonObject rate : results) {
     // Store rate data for graphing with actual timestamps
     if (rateCount < MAX_RATES) {
       const char* validFromStr = rate["valid_from"] | "";
       double priceVal = rate["value_inc_vat"] | 0.0;
 
-      if (priceVal > 0 && strlen(validFromStr) > 0) {
+      if (strlen(validFromStr) > 0) {
         rates[rateCount].price = priceVal;
         rates[rateCount].validFrom = parseISOTimestamp(validFromStr);
         rateCount++;
       }
     }
-
-    if (!hasFallbackRate) {
-      fallbackRate = rate;
-      hasFallbackRate = true;
-    }
-
-    const char* validFromCandidate = rate["valid_from"] | "";
-    const char* validToCandidate = rate["valid_to"] | "";
-    if (strlen(validFromCandidate) == 0 || strlen(validToCandidate) == 0) {
-      continue;
-    }
-
-    // Compare only first 19 characters (YYYY-MM-DDTHH:MM:SS) to ignore fractional seconds
-    if (!hasSelectedRate && (strncmp(validFromCandidate, currentIso, 19) <= 0) && (strncmp(currentIso, validToCandidate, 19) < 0)) {
-      selectedRate = rate;
-      hasSelectedRate = true;
-      currentRateIndex = rateCount - 1;  // Current rate is the last one we stored
-      Serial.print("Matched current slot: ");
-      Serial.print(validFromCandidate);
-      Serial.print(" to ");
-      Serial.println(validToCandidate);
-      // Don't break - continue storing all rates for full day view
-    }
-
-    loopIndex++;
   }
 
   Serial.print("Stored ");
   Serial.print(rateCount);
-  Serial.print(" rates for graphing, current index: ");
-  Serial.println(currentRateIndex);
-  logWithTimestamp("Rates stored and indexed.");
+  Serial.println(" rates for graphing.");
 
   // Reverse the rates array to get chronological order (API returns newest first)
   for (int i = 0; i < rateCount / 2; i++) {
@@ -537,55 +489,13 @@ bool fetchCurrentPrice() {
     rates[i] = rates[rateCount - 1 - i];
     rates[rateCount - 1 - i] = temp;
   }
-  // Update current rate index after reversal
-  if (currentRateIndex >= 0) {
-    currentRateIndex = rateCount - 1 - currentRateIndex;
-  }
 
   // Cap to expected slots (46 slots from 0:00 to 23:00)
   if (rateCount > EXPECTED_SLOTS) {
-    Serial.print("Capping rates from ");
-    Serial.print(rateCount);
-    Serial.print(" to ");
-    Serial.println(EXPECTED_SLOTS);
     rateCount = EXPECTED_SLOTS;
   }
 
-  // Keep graphStartTime as midnight for full 24-hour day view
-
-  JsonObject rateObject;
-  if (hasSelectedRate) {
-    rateObject = selectedRate;
-    statusMessage = "";
-  } else if (hasFallbackRate) {
-    rateObject = fallbackRate;
-    statusMessage = "Showing next slot";
-  } else {
-    logWithTimestamp("No rate data returned after processing.");
-    statusMessage = "No rate data";
-    return false;
-  }
-
-  double priceValue = rateObject["value_inc_vat"] | -1.0;
-  const char* validFrom = rateObject["valid_from"] | "";
-  const char* validTo = rateObject["valid_to"] | "";
-
-  if (priceValue < 0) {
-    logWithTimestamp("Invalid price value.");
-    statusMessage = "Invalid price";
-    return false;
-  }
-
-  currentPrice = String(priceValue, 2) + " p/kWh";
-  priceWindow = extractTimeFromISO(validFrom) + " - " + extractTimeFromISO(validTo) + " UTC";
-  lastUpdated = currentIso;
-
-  Serial.print("Current price: ");
-  Serial.println(currentPrice);
-  Serial.print("Valid window: ");
-  Serial.println(priceWindow);
   logWithTimestamp("Price fetch complete.");
-
   return true;
 }
 
@@ -596,18 +506,15 @@ void drawPriceGraph(int x, int y, int width, int height) {
   PriceStats stats = calculatePriceStats();
   double priceRange = stats.maxPrice - stats.minPrice;
 
-  // Use fixed 24-hour time range (midnight to midnight)
-  time_t timeRange = SECONDS_PER_DAY;
-
   // Draw all graph components
   drawGridLinesAndLabels(x, y, width, height, stats.minPrice, stats.maxPrice, priceRange);
-  drawCurrentTimeSlot(x, y, width, height, timeRange);
-  drawPriceBars(x, y, width, height, stats.minPrice, priceRange, stats.medianPrice, timeRange);
-  drawTimeLabels(x, y, width, height, timeRange);
+  drawCurrentTimeSlot(x, y, width, height);
+  drawPriceBars(x, y, width, height, stats.minPrice, priceRange, stats.medianPrice);
+  drawTimeLabels(x, y, width, height);
 }
 
 void enterDeepSleep(time_t sleepSeconds) {
-  logWithTimestamp("Disconnecting WiFi.");
+  // Ensure WiFi is off before sleeping
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
@@ -618,15 +525,6 @@ void enterDeepSleep(time_t sleepSeconds) {
 
   esp_sleep_enable_timer_wakeup(sleepSeconds * 1000000ULL);  // Convert to microseconds
   esp_deep_sleep_start();
-}
-
-void clearDisplay() {
-  display.setFullWindow();
-  display.firstPage();
-  do {
-    display.fillScreen(GxEPD_WHITE);
-  } while (display.nextPage());
-  display.hibernate();
 }
 
 void updateDisplay() {
@@ -663,62 +561,74 @@ void setup() {
   Serial.println(esp_sleep_get_wakeup_cause());
   logWithTimestamp("ESP32 Octopus Price Display starting.");
 
-  // Initialize the display (but don't update on first boot - shows stale screen)
+  // Initialize the display
   display.init(115200, true, 2, false);
   display.setRotation(1);
 
-  // Connect to WiFi
-  logWithTimestamp("Connecting to WiFi...");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nWiFi connection failed!");
-    logWithTimestamp("WiFi connection failed.");
-    // Sleep and try again later
-    enterDeepSleep(WAKE_INTERVAL_S);
-    return;
-  }
-
-  Serial.println("\nWiFi connected!");
-  logWithTimestamp("WiFi connected.");
-
-  // Sync time on first boot or if time not set
+  // Determine if we need WiFi this wake cycle
   time_t now = time(nullptr);
-  if (rtcBootCount == 1 || now < 1000000000) {
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
-    logWithTimestamp("Time sync starting.");
-    if (!waitForTimeSync()) {
-      syncTimeFromHttp();
-    }
-    now = time(nullptr);
-  }
+  bool needTimeSync = (rtcBootCount == 1) || (now < 1000000000) ||
+      (now >= 1000000000 && rtcLastTimeSync > 0 && (now - rtcLastTimeSync) >= TIME_SYNC_INTERVAL_S);
+  bool needPriceFetch = (rtcBootCount == 1) || (rateCount == 0) ||
+      (now >= 1000000000 && rtcLastPriceFetch > 0 && (now - rtcLastPriceFetch) >= PRICE_FETCH_INTERVAL_S);
+  bool needWiFi = needTimeSync || needPriceFetch;
 
-  // Determine if we need to fetch prices (every 6 hours or on first boot)
-  bool shouldFetchPrices = false;
-  if (rtcBootCount == 1) {
-    shouldFetchPrices = true;
-    logWithTimestamp("First boot - fetching prices.");
-  } else if (now >= 1000000000 && rtcLastPriceFetch > 0) {
-    time_t timeSinceLastFetch = now - rtcLastPriceFetch;
-    if (timeSinceLastFetch >= PRICE_FETCH_INTERVAL_S) {
-      shouldFetchPrices = true;
-      logWithTimestamp("6 hours elapsed - fetching prices.");
-    }
-  }
+  if (needWiFi) {
+    // Connect to WiFi
+    logWithTimestamp("Connecting to WiFi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
 
-  // Fetch prices if needed
-  if (shouldFetchPrices) {
-    if (fetchCurrentPrice()) {
-      rtcLastPriceFetch = now;
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
     }
+
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("\nWiFi connection failed!");
+      logWithTimestamp("WiFi connection failed.");
+      // If we have rate data, update display anyway and sleep
+      if (rateCount > 0) {
+        updateCurrentRateIndexFromNow();
+        updateDisplay();
+      }
+      enterDeepSleep(WAKE_INTERVAL_S);
+      return;
+    }
+
+    Serial.println("\nWiFi connected!");
+    logWithTimestamp("WiFi connected.");
+
+    // Sync time if needed
+    if (needTimeSync) {
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+      logWithTimestamp("Time sync starting.");
+      if (!waitForTimeSync()) {
+        syncTimeFromHttp();
+      }
+      now = time(nullptr);
+      if (now >= 1000000000) {
+        rtcLastTimeSync = now;
+      }
+    }
+
+    // Fetch prices if needed
+    if (needPriceFetch) {
+      logWithTimestamp("Fetching prices.");
+      if (fetchCurrentPrice()) {
+        now = time(nullptr);
+        rtcLastPriceFetch = now;
+      }
+    }
+
+    // Disconnect WiFi immediately after use
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    logWithTimestamp("WiFi disconnected.");
+  } else {
+    logWithTimestamp("Display-only wake - skipping WiFi.");
   }
 
   // Update current rate index based on current time
@@ -751,12 +661,7 @@ void setup() {
 }
 
 void loop() {
-  // With deep sleep mode, this loop is not used - setup() handles everything
-  // and then enters deep sleep. The device wakes, runs setup() again, and sleeps.
-  //
-  // The BOOT button naturally resets the ESP32, so pressing it will restart
-  // the device and run setup() again.
-
-  // If we somehow end up here, just sleep
-  delay(1000);
+  // Not used - setup() handles everything and enters deep sleep.
+  // If we somehow reach here, sleep immediately.
+  enterDeepSleep(WAKE_INTERVAL_S);
 }
