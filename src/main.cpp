@@ -277,12 +277,19 @@ void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice
   display.setFont();
   for (double price = minPrice; price <= maxPrice; price += PRICE_GRID_INTERVAL) {
     int gridY = y + height - (int)((price - minPrice) / priceRange * height);
-    // Dashed horizontal grid line (lighter appearance)
-    const int dashLength = 1;
-    const int gapLength = 2;
-    for (int xx = x; xx <= x + width; xx += dashLength + gapLength) {
-      int xEnd = min(xx + dashLength, x + width);
-      display.drawLine(xx, gridY, xEnd, gridY, GxEPD_BLACK);
+
+    // Draw grid line (solid for bottom line, dashed for others)
+    if (price == minPrice) {
+      // Solid line for bottom of graph
+      display.drawLine(x, gridY, x + width, gridY, GxEPD_BLACK);
+    } else {
+      // Dashed horizontal grid line (lighter appearance)
+      const int dashLength = 1;
+      const int gapLength = 2;
+      for (int xx = x; xx <= x + width; xx += dashLength + gapLength) {
+        int xEnd = min(xx + dashLength, x + width);
+        display.drawLine(xx, gridY, xEnd, gridY, GxEPD_BLACK);
+      }
     }
 
     // Draw Y-axis label on the right
