@@ -5,8 +5,6 @@
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>
 #include "GxEPD2_290_Custom.h"  // Custom driver with white border
-#include <Fonts/FreeMonoBold9pt7b.h>
-#include <Fonts/FreeSans9pt7b.h>
 #include <time.h>
 #include <sys/time.h>
 #include <cstring>
@@ -18,8 +16,6 @@
 #define EPD_DC    17
 #define EPD_RST   16
 #define EPD_BUSY  4
-#define BUTTON_PIN 0  // BOOT button on most ESP32 boards
-
 // Initialize display (296x128, 2.9" Waveshare) with custom driver
 GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custom(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
@@ -39,18 +35,12 @@ GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custo
 #define OCTOPUS_TARIFF_CODE OCTOPUS_TARIFF_PREFIX OCTOPUS_PRODUCT_CODE "-" OCTOPUS_REGION_CODE
 #endif
 
-// Display dimensions
-const int DISPLAY_WIDTH = 296;
-const int DISPLAY_HEIGHT = 128;
-
 // Graph positioning and size
 const int GRAPH_X = 0;              // Graph left margin
 const int GRAPH_Y = 5;              // Graph top margin
 const int GRAPH_HEIGHT = 110;       // Graph height in pixels
 
 // Label positioning
-const int DATE_LABEL_X = 13;                // Date label X position (top left)
-const int DATE_LABEL_Y = 16;                // Date label Y position (top left)
 const int Y_LABEL_OFFSET = 2;               // Gap between graph and price labels (right side)
 const int Y_LABEL_VERTICAL_OFFSET = -3;     // Vertical adjustment for price labels (adjust to align with grid lines)
 const int HOUR_LABEL_CENTER_OFFSET = 1;     // Fine-tune horizontal centering of hour labels (adjust to align with bars)
@@ -80,11 +70,6 @@ const int BAR_GAP = 1;                                    // Total gap per slot 
 // Calculated dimensions (auto-update based on above)
 const int SLOT_WIDTH = BAR_WIDTH + BAR_GAP;               // Width of each time slot (currently 5px)
 const int GRAPH_WIDTH = EXPECTED_SLOTS * SLOT_WIDTH;      // Total graph width (currently 230px)
-
-String currentPrice = "Fetching price...";
-String priceWindow = "Waiting for data...";
-String lastUpdated = "--";
-String statusMessage = "";
 
 // Store rate data for graphing (in RTC memory to persist across deep sleep)
 struct RateData {
@@ -126,7 +111,6 @@ bool waitForTimeSync() {
 
   if (now < 1000000000) {
     logWithTimestamp("Unable to get valid time from NTP.");
-    statusMessage = "Time sync failed";
     return false;
   }
 
@@ -142,7 +126,6 @@ bool syncTimeFromHttp() {
   HTTPClient http;
   if (!http.begin(client, timeUrl)) {
     logWithTimestamp("Failed to init HTTP client for time API.");
-    statusMessage = "Time API init failed";
     return false;
   }
 
@@ -151,7 +134,6 @@ bool syncTimeFromHttp() {
     Serial.print("Time API HTTP Error: ");
     Serial.println(httpCode);
     logWithTimestamp("Time API HTTP error.");
-    statusMessage = "Time API error";
     http.end();
     return false;
   }
@@ -163,14 +145,12 @@ bool syncTimeFromHttp() {
     Serial.print("Time JSON parse failed: ");
     Serial.println(error.f_str());
     logWithTimestamp("Time JSON parse failed.");
-    statusMessage = "Time parse error";
     return false;
   }
 
   long unixTime = timeDoc["unixtime"] | 0;
   if (unixTime <= 0) {
     logWithTimestamp("Invalid time received from API.");
-    statusMessage = "Invalid time";
     return false;
   }
 
@@ -192,17 +172,6 @@ bool timeToUtcStruct(time_t timestamp, struct tm& out) {
   }
   memcpy(&out, tmp, sizeof(struct tm));
   return true;
-}
-
-String extractTimeFromISO(const char* isoTime) {
-  if (!isoTime) {
-    return "--:--";
-  }
-  String timeString = isoTime;
-  if (timeString.length() >= 16) {
-    return timeString.substring(11, 16);  // HH:MM
-  }
-  return timeString;
 }
 
 time_t parseISOTimestamp(const char* isoTime) {
@@ -396,7 +365,6 @@ void updateCurrentRateIndexFromNow() {
 
 bool fetchCurrentPrice() {
   if (WiFi.status() != WL_CONNECTED) {
-    statusMessage = "WiFi disconnected";
     logWithTimestamp("Price fetch skipped: WiFi disconnected.");
     return false;
   }
@@ -413,7 +381,6 @@ bool fetchCurrentPrice() {
 
   struct tm currentInfo;
   if (!timeToUtcStruct(now, currentInfo)) {
-    statusMessage = "Time convert failed";
     logWithTimestamp("Time conversion failed.");
     return false;
   }
@@ -427,11 +394,9 @@ bool fetchCurrentPrice() {
 
   struct tm periodStartInfo, periodEndInfo;
   if (!timeToUtcStruct(periodStart, periodStartInfo)) {
-    statusMessage = "Period start failed";
     return false;
   }
   if (!timeToUtcStruct(periodEnd, periodEndInfo)) {
-    statusMessage = "Period end failed";
     return false;
   }
 
@@ -461,7 +426,6 @@ bool fetchCurrentPrice() {
   HTTPClient http;
   if (!http.begin(client, url)) {
     logWithTimestamp("Failed to initialize HTTP client.");
-    statusMessage = "HTTP init failed";
     return false;
   }
 
@@ -470,7 +434,6 @@ bool fetchCurrentPrice() {
     Serial.print("HTTP Error: ");
     Serial.println(httpCode);
     logWithTimestamp("Price fetch HTTP error.");
-    statusMessage = "HTTP error " + String(httpCode);
     http.end();
     return false;
   }
@@ -484,14 +447,12 @@ bool fetchCurrentPrice() {
     Serial.print("JSON parse failed: ");
     Serial.println(error.f_str());
     logWithTimestamp("Price JSON parse failed.");
-    statusMessage = "JSON parse error";
     return false;
   }
 
   JsonArray results = doc["results"];
   if (!results || results.size() == 0) {
     logWithTimestamp("No rate data returned.");
-    statusMessage = "No rate data";
     return false;
   }
 
