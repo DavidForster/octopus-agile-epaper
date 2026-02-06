@@ -38,17 +38,22 @@ GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custo
 #define OCTOPUS_TARIFF_CODE OCTOPUS_TARIFF_PREFIX OCTOPUS_PRODUCT_CODE "-" OCTOPUS_REGION_CODE
 #endif
 
-// Display layout constants
-const int GRAPH_X = 5;
-const int GRAPH_Y = 5;
-const int GRAPH_WIDTH = 270;
-const int GRAPH_HEIGHT = 110;
-const int DATE_LABEL_X = 13;
-const int DATE_LABEL_Y = 16;
-const int Y_LABEL_OFFSET = 2;
-const int Y_LABEL_VERTICAL_OFFSET = 3;
-const int HOUR_LABEL_X_OFFSET = -3;
-const int HOUR_LABEL_Y_OFFSET = 5;
+// Display dimensions
+const int DISPLAY_WIDTH = 296;
+const int DISPLAY_HEIGHT = 128;
+
+// Graph positioning and size
+const int GRAPH_X = 0;              // Graph left margin
+const int GRAPH_Y = 5;              // Graph top margin
+const int GRAPH_HEIGHT = 110;       // Graph height in pixels
+
+// Label positioning
+const int DATE_LABEL_X = 13;                // Date label X position (top left)
+const int DATE_LABEL_Y = 16;                // Date label Y position (top left)
+const int Y_LABEL_OFFSET = 2;               // Gap between graph and price labels (right side)
+const int Y_LABEL_VERTICAL_OFFSET = 3;      // Vertical adjustment for price labels
+const int HOUR_LABEL_X_OFFSET = -3;         // Horizontal adjustment for hour labels (bottom)
+const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels (bottom)
 
 // Time constants (seconds)
 const time_t SECONDS_PER_DAY = 86400;
@@ -59,9 +64,18 @@ const unsigned long PRICE_FETCH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL; // 6 h
 const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // 6 hours
 
 // Graph display constants
-const double PRICE_GRID_INTERVAL = 5.0;  // Grid line every 5 pence
-const int HOUR_LABEL_INTERVAL = 2;       // Show hour label every 2 hours
-const int MAX_RATES = 60;                // Buffer size for rate data
+const double PRICE_GRID_INTERVAL = 5.0;                   // Grid line every 5 pence
+const int HOUR_LABEL_INTERVAL = 2;                        // Show hour label every 2 hours
+const int MAX_RATES = 60;                                 // Buffer size for rate data
+
+// Bar sizing (adjust these to change appearance)
+const int EXPECTED_SLOTS = 46;                            // Expected number of 30-min slots (0:00 to 23:00)
+const int BAR_WIDTH = 5;                                  // Bar width in pixels (odd number for centering)
+const int BAR_GAP = 1;                                    // Total gap per slot (1px each side of bar)
+
+// Calculated dimensions (auto-update based on above)
+const int SLOT_WIDTH = BAR_WIDTH + BAR_GAP;               // Width of each time slot (currently 5px)
+const int GRAPH_WIDTH = EXPECTED_SLOTS * SLOT_WIDTH;      // Total graph width (currently 230px)
 
 String currentPrice = "Fetching price...";
 String priceWindow = "Waiting for data...";
@@ -266,7 +280,7 @@ void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice
     int gridY = y + height - (int)((price - minPrice) / priceRange * height);
     // Dashed horizontal grid line (lighter appearance)
     const int dashLength = 2;
-    const int gapLength = 5;
+    const int gapLength = 0;
     for (int xx = x; xx <= x + width; xx += dashLength + gapLength) {
       int xEnd = min(xx + dashLength, x + width);
       display.drawLine(xx, gridY, xEnd, gridY, GxEPD_BLACK);
@@ -282,16 +296,12 @@ void drawGridLinesAndLabels(int x, int y, int width, int height, double minPrice
 
 void drawPriceBars(int x, int y, int width, int height, double minPrice, double priceRange, double medianPrice, time_t timeRange) {
   for (int i = 0; i < rateCount; i++) {
-    // Calculate x position and width based on time
-    int barX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
-    int nextX;
-    if (i < rateCount - 1) {
-      nextX = x + ((rates[i + 1].validFrom - graphStartTime) * width) / timeRange;
-    } else {
-      // For the last bar, use standard 30-minute slot duration
-      nextX = x + ((rates[i].validFrom + RATE_SLOT_DURATION - graphStartTime) * width) / timeRange;
-    }
-    int barWidth = nextX - barX - 1;  // -1 for spacing between bars
+    // Calculate slot position (each slot is SLOT_WIDTH pixels)
+    int slotStartX = x + (i * SLOT_WIDTH);
+
+    // Center the fixed-width bar within the slot
+    // BAR_GAP pixels distributed around bar: gap/2 offset from slot start
+    int barX = slotStartX + (BAR_GAP / 2);
 
     // Calculate bar height
     int barHeight = (int)((rates[i].price - minPrice) / priceRange * height);
@@ -299,21 +309,20 @@ void drawPriceBars(int x, int y, int width, int height, double minPrice, double 
 
     // Ensure bar is within bounds
     barX = constrain(barX, x, x + width);
-    barWidth = constrain(barWidth, 1, width);
     barY = constrain(barY, y, y + height);
     barHeight = constrain(barHeight, 0, height);
 
     // Fill bar based on price
     if (rates[i].price > medianPrice) {
       // High price - draw as filled black (expensive)
-      display.fillRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+      display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_BLACK);
     } else {
       // Low price - draw as white with black border (cheaper)
-      display.fillRect(barX, barY, barWidth, barHeight, GxEPD_WHITE);
+      display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_WHITE);
     }
 
     // Draw black border around bar
-    display.drawRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+    display.drawRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_BLACK);
   }
 }
 
@@ -323,7 +332,10 @@ void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
     if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
       // Show label at regular hour intervals
       if (timeInfo.tm_min == 0 && timeInfo.tm_hour % HOUR_LABEL_INTERVAL == 0) {
-        int labelX = x + ((rates[i].validFrom - graphStartTime) * width) / timeRange;
+        // Calculate center of the slot for label positioning
+        int slotStartX = x + (i * SLOT_WIDTH);
+        int labelX = slotStartX + (SLOT_WIDTH / 2);
+
         char timeLabel[4];
         snprintf(timeLabel, sizeof(timeLabel), "%d", timeInfo.tm_hour);
         display.setCursor(labelX + HOUR_LABEL_X_OFFSET, y + height + HOUR_LABEL_Y_OFFSET);
@@ -335,11 +347,12 @@ void drawTimeLabels(int x, int y, int width, int height, time_t timeRange) {
 
 void drawCurrentTimeSlot(int x, int y, int width, int height, time_t timeRange) {
   if (currentRateIndex >= 0 && currentRateIndex < rateCount) {
-    time_t currentSlotStart = rates[currentRateIndex].validFrom;
-    time_t currentSlotMid = currentSlotStart + HALF_SLOT_DURATION;
-    int currentX = x + ((currentSlotMid - graphStartTime) * width) / timeRange;
+    // Calculate the center of the current slot's bar
+    int slotStartX = x + (currentRateIndex * SLOT_WIDTH);
+    int barX = slotStartX + (BAR_GAP / 2);
+    int currentX = barX + (BAR_WIDTH / 2);
 
-    // Solid vertical line to indicate current slot.
+    // Solid vertical line to indicate current slot, centered in the bar
     display.drawLine(currentX, y, currentX, y + height, GxEPD_BLACK);
   }
 }
