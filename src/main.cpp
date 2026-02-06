@@ -581,6 +581,15 @@ bool fetchCurrentPrice() {
     currentRateIndex = rateCount - 1 - currentRateIndex;
   }
 
+  // Cap to expected slots (46 slots from 0:00 to 23:00)
+  if (rateCount > EXPECTED_SLOTS) {
+    Serial.print("Capping rates from ");
+    Serial.print(rateCount);
+    Serial.print(" to ");
+    Serial.println(EXPECTED_SLOTS);
+    rateCount = EXPECTED_SLOTS;
+  }
+
   // Keep graphStartTime as midnight for full 24-hour day view
 
   JsonObject rateObject;
