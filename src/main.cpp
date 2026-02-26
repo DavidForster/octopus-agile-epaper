@@ -59,6 +59,12 @@ RTC_DATA_ATTR int rtcBootCount = 0;
 RTC_DATA_ATTR int rtcLastDisplayedRateIndex = -1;  // Track which rate was last displayed
 RTC_DATA_ATTR int rtcRefreshCounter = 0;            // Counter for periodic full refresh
 
+// Drift compensation: measure RTC drift at each NTP sync and correct between syncs
+// driftPerHour stores the observed error in seconds per hour of elapsed time
+// (positive = RTC runs fast, negative = RTC runs slow)
+RTC_DATA_ATTR double rtcDriftPerHour = 0.0;
+RTC_DATA_ATTR time_t rtcLastCorrectionTime = 0;  // When we last applied/measured drift
+
 // Graph display constants
 const double PRICE_GRID_INTERVAL = 5.0;                   // Grid line every 5 pence
 const int HOUR_LABEL_INTERVAL = 2;                        // Show hour label every 2 hours
@@ -100,6 +106,25 @@ void logWithTimestamp(const char* message) {
     }
   }
   Serial.println(message);
+}
+
+void applyDriftCorrection() {
+  time_t now = time(nullptr);
+  if (now < 1000000000 || rtcLastCorrectionTime == 0 || rtcDriftPerHour == 0.0) return;
+
+  double elapsedHours = (double)(now - rtcLastCorrectionTime) / 3600.0;
+  long correctionSeconds = (long)(rtcDriftPerHour * elapsedHours);
+  if (correctionSeconds == 0) return;
+
+  struct timeval tv;
+  tv.tv_sec = now - correctionSeconds;  // Subtract drift (positive drift = clock ahead)
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
+  rtcLastCorrectionTime = tv.tv_sec;
+
+  Serial.print("Drift correction applied: ");
+  Serial.print(-correctionSeconds);
+  Serial.println("s");
 }
 
 bool waitForTimeSync() {
@@ -609,6 +634,9 @@ void setup() {
 
     // Sync time if needed
     if (needTimeSync) {
+      // Capture RTC time before NTP sync to measure drift
+      time_t rtcTimeBeforeSync = time(nullptr);
+
       configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
       logWithTimestamp("Time sync starting.");
       if (!waitForTimeSync()) {
@@ -616,7 +644,27 @@ void setup() {
       }
       now = time(nullptr);
       if (now >= 1000000000) {
+        // Measure and record drift rate
+        if (rtcTimeBeforeSync >= 1000000000 && rtcLastCorrectionTime > 0) {
+          double elapsedHours = (double)(rtcTimeBeforeSync - rtcLastCorrectionTime) / 3600.0;
+          if (elapsedHours >= 0.5) {  // Need at least 30 min for a meaningful measurement
+            long driftSeconds = rtcTimeBeforeSync - now;
+            double measuredDriftPerHour = (double)driftSeconds / elapsedHours;
+            // Smooth with previous measurement to avoid jumps from network latency
+            if (rtcDriftPerHour != 0.0) {
+              rtcDriftPerHour = rtcDriftPerHour * 0.7 + measuredDriftPerHour * 0.3;
+            } else {
+              rtcDriftPerHour = measuredDriftPerHour;
+            }
+            Serial.print("RTC drift measured: ");
+            Serial.print(measuredDriftPerHour, 4);
+            Serial.print("s/hr, smoothed: ");
+            Serial.print(rtcDriftPerHour, 4);
+            Serial.println("s/hr");
+          }
+        }
         rtcLastTimeSync = now;
+        rtcLastCorrectionTime = now;
       }
     }
 
@@ -635,6 +683,7 @@ void setup() {
     logWithTimestamp("WiFi disconnected.");
   } else {
     logWithTimestamp("Display-only wake - skipping WiFi.");
+    applyDriftCorrection();
   }
 
   // Update current rate index based on current time
