@@ -51,12 +51,13 @@ const time_t SECONDS_PER_DAY = 86400;
 const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
 const time_t WAKE_INTERVAL_S = 900;      // Wake every 15 minutes (quarter-hour)
 const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // Fetch prices every 6 hours
-const time_t TIME_SYNC_INTERVAL_S = 24 * 60 * 60;  // Re-sync time every 24 hours
 
 // RTC memory variables (persist across deep sleep)
 RTC_DATA_ATTR time_t rtcLastPriceFetch = 0;
 RTC_DATA_ATTR time_t rtcLastTimeSync = 0;
 RTC_DATA_ATTR int rtcBootCount = 0;
+RTC_DATA_ATTR int rtcLastDisplayedRateIndex = -1;  // Track which rate was last displayed
+RTC_DATA_ATTR int rtcRefreshCounter = 0;            // Counter for periodic full refresh
 
 // Graph display constants
 const double PRICE_GRID_INTERVAL = 5.0;                   // Grid line every 5 pence
@@ -530,6 +531,11 @@ void enterDeepSleep(time_t sleepSeconds) {
 void updateDisplay() {
   logWithTimestamp("Display update start.");
 
+  // E-ink refresh strategy: Always use FULL refresh
+  // - Full refresh clears ghosting and prevents stuck pixels
+  // - Takes ~1.6s but ensures clean display
+  // - This function is only called when display content changes or periodically (~1 hour)
+  // - E-ink displays support millions of full refreshes, so this is safe
   display.setFullWindow();
   display.firstPage();
   do {
@@ -567,11 +573,11 @@ void setup() {
 
   // Determine if we need WiFi this wake cycle
   time_t now = time(nullptr);
-  bool needTimeSync = (rtcBootCount == 1) || (now < 1000000000) ||
-      (now >= 1000000000 && rtcLastTimeSync > 0 && (now - rtcLastTimeSync) >= TIME_SYNC_INTERVAL_S);
   bool needPriceFetch = (rtcBootCount == 1) || (rateCount == 0) ||
       (now >= 1000000000 && rtcLastPriceFetch > 0 && (now - rtcLastPriceFetch) >= PRICE_FETCH_INTERVAL_S);
-  bool needWiFi = needTimeSync || needPriceFetch;
+  bool needWiFi = needPriceFetch || (now < 1000000000);
+  // Always re-sync time when WiFi is already needed — essentially free
+  bool needTimeSync = needWiFi;
 
   if (needWiFi) {
     // Connect to WiFi
@@ -634,10 +640,34 @@ void setup() {
   // Update current rate index based on current time
   updateCurrentRateIndexFromNow();
 
-  // Update display if we have rate data
+  // Determine if display update is needed
+  bool needDisplayUpdate = false;
   if (rateCount > 0) {
-    logWithTimestamp("Updating display.");
-    updateDisplay();
+    // Update display if:
+    // 1. Current rate slot has changed (rate updates every 30 min)
+    // 2. Price data was just fetched (new graph data)
+    // 3. Every 4 wakes (~1 hour) for periodic full refresh to prevent ghosting
+    if (currentRateIndex != rtcLastDisplayedRateIndex) {
+      logWithTimestamp("Rate slot changed - updating display.");
+      needDisplayUpdate = true;
+    } else if (needPriceFetch && rtcLastPriceFetch == now) {
+      logWithTimestamp("New price data fetched - updating display.");
+      needDisplayUpdate = true;
+    } else if (rtcRefreshCounter >= 4) {
+      logWithTimestamp("Periodic refresh to prevent ghosting.");
+      needDisplayUpdate = true;
+      rtcRefreshCounter = 0;
+    }
+
+    if (needDisplayUpdate) {
+      updateDisplay();
+      rtcLastDisplayedRateIndex = currentRateIndex;
+    } else {
+      logWithTimestamp("Display unchanged - skipping update to save power.");
+    }
+
+    // Increment refresh counter
+    rtcRefreshCounter++;
   } else {
     logWithTimestamp("No rate data - skipping display update.");
   }
