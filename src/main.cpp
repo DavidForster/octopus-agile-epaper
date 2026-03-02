@@ -574,6 +574,20 @@ void updateDisplay() {
       logWithTimestamp("Graph render complete.");
     }
 
+#ifdef DEBUG_DISPLAY
+    {
+      time_t debugNow = time(nullptr);
+      struct tm debugInfo;
+      if (debugNow >= 1000000000 && timeToUtcStruct(debugNow, debugInfo)) {
+        char debugTime[9];
+        strftime(debugTime, sizeof(debugTime), "%H:%M:%S", &debugInfo);
+        display.setFont();
+        display.setCursor(0, 0);
+        display.print(debugTime);
+      }
+    }
+#endif
+
   } while (display.nextPage());
 
   logWithTimestamp("Display update complete.");
@@ -600,7 +614,14 @@ void setup() {
   time_t now = time(nullptr);
   bool needPriceFetch = (rtcBootCount == 1) || (rateCount == 0) ||
       (now >= 1000000000 && rtcLastPriceFetch > 0 && (now - rtcLastPriceFetch) >= PRICE_FETCH_INTERVAL_S);
-  bool needWiFi = needPriceFetch || (now < 1000000000);
+
+  // Early drift calibration: sync at ~15min, ~30min and ~1hr to get accurate drift
+  // measurements quickly, then rely on regular price-fetch syncs (every 6hr) thereafter.
+  // Boot 1 = 0min, boot 2 = 15min, boot 3 = 30min, boot 5 = 1hr
+  bool needEarlyDriftSync = (rtcBootCount == 2 || rtcBootCount == 3 || rtcBootCount == 5) &&
+      now >= 1000000000 && rtcLastCorrectionTime > 0;
+
+  bool needWiFi = needPriceFetch || needEarlyDriftSync || (now < 1000000000);
   // Always re-sync time when WiFi is already needed — essentially free
   bool needTimeSync = needWiFi;
 
