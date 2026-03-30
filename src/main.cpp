@@ -8,6 +8,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <cstring>
+#include <cstdlib>
 #include "credentials.h"  // WiFi credentials
 #include <esp_sleep.h>
 
@@ -95,6 +96,7 @@ RTC_DATA_ATTR time_t graphStartTime = 0;  // Store the start time of the graph f
 bool timeToUtcStruct(time_t timestamp, struct tm& out);
 bool timeToLocalStruct(time_t timestamp, struct tm& out);
 time_t utcStructToEpoch(const struct tm& utcTime);
+void configureLocalTimezone();
 
 void logWithTimestamp(const char* message) {
   time_t now = time(nullptr);
@@ -244,6 +246,11 @@ time_t utcStructToEpoch(const struct tm& utcTime) {
       utcTime.tm_hour * 3600L +
       utcTime.tm_min * 60L +
       utcTime.tm_sec;
+}
+
+void configureLocalTimezone() {
+  setenv("TZ", LOCAL_TIMEZONE, 1);
+  tzset();
 }
 
 time_t parseISOTimestamp(const char* isoTime) {
@@ -657,6 +664,7 @@ void updateDisplay() {
 void setup() {
   Serial.begin(115200);
   delay(100);  // Allow serial to initialize
+  configureLocalTimezone();
 
   // Increment boot counter
   rtcBootCount++;
