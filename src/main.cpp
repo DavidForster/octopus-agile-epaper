@@ -35,6 +35,9 @@ GxEPD2_BW<GxEPD2_290_Custom, GxEPD2_290_Custom::HEIGHT> display(GxEPD2_290_Custo
 #define OCTOPUS_TARIFF_CODE OCTOPUS_TARIFF_PREFIX OCTOPUS_PRODUCT_CODE "-" OCTOPUS_REGION_CODE
 #endif
 
+// UK local time with automatic DST handling (GMT in winter, BST in summer)
+const char* LOCAL_TIMEZONE = "GMT0BST,M3.5.0/1,M10.5.0/2";
+
 // Graph positioning and size
 const int GRAPH_X = 0;              // Graph left margin
 const int GRAPH_Y = 5;              // Graph top margin
@@ -90,6 +93,8 @@ RTC_DATA_ATTR int currentRateIndex = -1;
 RTC_DATA_ATTR time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
 
 bool timeToUtcStruct(time_t timestamp, struct tm& out);
+bool timeToLocalStruct(time_t timestamp, struct tm& out);
+time_t utcStructToEpoch(const struct tm& utcTime);
 
 void logWithTimestamp(const char* message) {
   time_t now = time(nullptr);
@@ -201,6 +206,46 @@ bool timeToUtcStruct(time_t timestamp, struct tm& out) {
   return true;
 }
 
+bool timeToLocalStruct(time_t timestamp, struct tm& out) {
+  struct tm* tmp = localtime(&timestamp);
+  if (!tmp) {
+    return false;
+  }
+  memcpy(&out, tmp, sizeof(struct tm));
+  return true;
+}
+
+time_t utcStructToEpoch(const struct tm& utcTime) {
+  static const int daysBeforeMonth[] = {
+      0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+  };
+
+  int year = utcTime.tm_year + 1900;
+  if (year < 1970) {
+    return 0;
+  }
+
+  auto isLeapYear = [](int y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+  };
+
+  long days = 0;
+  for (int y = 1970; y < year; ++y) {
+    days += isLeapYear(y) ? 366 : 365;
+  }
+
+  days += daysBeforeMonth[utcTime.tm_mon];
+  if (utcTime.tm_mon >= 2 && isLeapYear(year)) {
+    days += 1;
+  }
+  days += utcTime.tm_mday - 1;
+
+  return (time_t)days * SECONDS_PER_DAY +
+      utcTime.tm_hour * 3600L +
+      utcTime.tm_min * 60L +
+      utcTime.tm_sec;
+}
+
 time_t parseISOTimestamp(const char* isoTime) {
   if (!isoTime || strlen(isoTime) < 19) {
     return 0;
@@ -219,9 +264,9 @@ time_t parseISOTimestamp(const char* isoTime) {
     tm.tm_sec = sec;
     tm.tm_isdst = 0;
 
-    // Convert to time_t - since we configured ESP32 with UTC (configTime(0, 0, ...)),
-    // mktime treats this as UTC
-    return mktime(&tm);
+    // Octopus timestamps are UTC (`...Z`), so convert explicitly instead of
+    // relying on the process timezone or non-portable libc helpers.
+    return utcStructToEpoch(tm);
   }
   return 0;
 }
@@ -333,7 +378,7 @@ void drawPriceBars(int x, int y, int width, int height, double minPrice, double 
 void drawTimeLabels(int x, int y, int width, int height) {
   struct tm timeInfo;
   for (int i = 0; i < rateCount; i++) {
-    if (timeToUtcStruct(rates[i].validFrom, timeInfo)) {
+    if (timeToLocalStruct(rates[i].validFrom, timeInfo)) {
       // Show label at regular hour intervals
       if (timeInfo.tm_min == 0 && timeInfo.tm_hour % HOUR_LABEL_INTERVAL == 0) {
         // Calculate center of the bar (not slot) for proper alignment
@@ -407,16 +452,31 @@ bool fetchCurrentPrice() {
   }
 
   struct tm currentInfo;
-  if (!timeToUtcStruct(now, currentInfo)) {
+  if (!timeToLocalStruct(now, currentInfo)) {
     logWithTimestamp("Time conversion failed.");
     return false;
   }
 
-  // Get prices for full current day (midnight to midnight)
-  // Calculate seconds since midnight
-  int secondsSinceMidnight = currentInfo.tm_hour * 3600 + currentInfo.tm_min * 60 + currentInfo.tm_sec;
-  time_t periodStart = now - secondsSinceMidnight;     // Start of today (midnight)
-  time_t periodEnd = periodStart + SECONDS_PER_DAY;   // End of today (next midnight)
+  // Fetch prices for the current local day. Around DST changes this window can
+  // be 23 or 25 hours long, so derive it from local midnight instead of
+  // assuming a fixed 86400-second day.
+  currentInfo.tm_hour = 0;
+  currentInfo.tm_min = 0;
+  currentInfo.tm_sec = 0;
+  time_t periodStart = mktime(&currentInfo);
+  if (periodStart < 0) {
+    logWithTimestamp("Failed to calculate local midnight.");
+    return false;
+  }
+
+  struct tm nextDayInfo = currentInfo;
+  nextDayInfo.tm_mday += 1;
+  time_t periodEnd = mktime(&nextDayInfo);
+  if (periodEnd < 0) {
+    logWithTimestamp("Failed to calculate next local midnight.");
+    return false;
+  }
+
   graphStartTime = periodStart;                        // Store for axis labels
 
   struct tm periodStartInfo, periodEndInfo;
@@ -578,7 +638,7 @@ void updateDisplay() {
     {
       time_t debugNow = time(nullptr);
       struct tm debugInfo;
-      if (debugNow >= 1000000000 && timeToUtcStruct(debugNow, debugInfo)) {
+      if (debugNow >= 1000000000 && timeToLocalStruct(debugNow, debugInfo)) {
         char debugTime[9];
         strftime(debugTime, sizeof(debugTime), "%H:%M:%S", &debugInfo);
         display.setFont();
@@ -658,7 +718,7 @@ void setup() {
       // Capture RTC time before NTP sync to measure drift
       time_t rtcTimeBeforeSync = time(nullptr);
 
-      configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+      configTzTime(LOCAL_TIMEZONE, "pool.ntp.org", "time.nist.gov", "time.google.com");
       logWithTimestamp("Time sync starting.");
       if (!waitForTimeSync()) {
         syncTimeFromHttp();
