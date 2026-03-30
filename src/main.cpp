@@ -54,7 +54,7 @@ const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels
 const time_t SECONDS_PER_DAY = 86400;
 const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
 const time_t WAKE_INTERVAL_S = 900;      // Wake every 15 minutes (quarter-hour)
-const time_t PRICE_FETCH_INTERVAL_S = 1 * 60 * 60; // Fetch prices every hour
+const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // Fetch prices every 6 hours
 
 // RTC memory variables (persist across deep sleep)
 RTC_DATA_ATTR time_t rtcLastPriceFetch = 0;
@@ -67,7 +67,9 @@ RTC_DATA_ATTR int rtcRefreshCounter = 0;            // Counter for periodic full
 // driftPerHour stores the observed error in seconds per hour of elapsed time
 // (positive = RTC runs fast, negative = RTC runs slow)
 RTC_DATA_ATTR double rtcDriftPerHour = 0.0;
-RTC_DATA_ATTR time_t rtcLastCorrectionTime = 0;  // When we last applied/measured drift
+RTC_DATA_ATTR double rtcAccumulatedDrift = 0.0;   // Sub-second drift carried across wakes
+RTC_DATA_ATTR time_t rtcLastCorrectionTime = 0;   // When we last applied/measured drift
+RTC_DATA_ATTR bool rtcFetchedAfter4pm = false;     // Whether we've fetched since 16:00 today
 
 // Graph display constants
 const double PRICE_GRID_INTERVAL = 5.0;                   // Grid line every 5 pence
@@ -124,8 +126,14 @@ void applyDriftCorrection() {
   if (now < 1000000000 || rtcLastCorrectionTime == 0 || rtcDriftPerHour == 0.0) return;
 
   double elapsedHours = (double)(now - rtcLastCorrectionTime) / 3600.0;
-  long correctionSeconds = (long)(rtcDriftPerHour * elapsedHours);
-  if (correctionSeconds == 0) return;
+  rtcAccumulatedDrift += rtcDriftPerHour * elapsedHours;
+
+  long correctionSeconds = (long)rtcAccumulatedDrift;  // truncate toward zero
+  if (correctionSeconds == 0) {
+    // No integer correction yet, but update baseline so elapsed tracking stays correct
+    rtcLastCorrectionTime = now;
+    return;
+  }
 
   struct timeval tv;
   tv.tv_sec = now - correctionSeconds;  // Subtract drift (positive drift = clock ahead)
@@ -133,9 +141,14 @@ void applyDriftCorrection() {
   settimeofday(&tv, nullptr);
   rtcLastCorrectionTime = tv.tv_sec;
 
+  // Keep the fractional remainder for next wake
+  rtcAccumulatedDrift -= (double)correctionSeconds;
+
   Serial.print("Drift correction applied: ");
   Serial.print(-correctionSeconds);
-  Serial.println("s");
+  Serial.print("s (remainder: ");
+  Serial.print(rtcAccumulatedDrift, 3);
+  Serial.println("s)");
 }
 
 bool waitForTimeSync() {
@@ -711,10 +724,26 @@ void setup() {
   bool needPriceFetch = (rtcBootCount == 1) || (rateCount == 0) ||
       (now >= 1000000000 && rtcLastPriceFetch > 0 && (now - rtcLastPriceFetch) >= PRICE_FETCH_INTERVAL_S);
 
-  // Early drift calibration: sync at ~15min, ~30min and ~1hr to get accurate drift
-  // measurements quickly, then rely on regular price-fetch syncs (every 6hr) thereafter.
-  // Boot 1 = 0min, boot 2 = 15min, boot 3 = 30min, boot 5 = 1hr
-  bool needEarlyDriftSync = (rtcBootCount == 2 || rtcBootCount == 3 || rtcBootCount == 5) &&
+  // Smart fetch: capture next-day prices released around 16:00 UK local time.
+  // If it's 16:xx and we haven't fetched since 16:00 today, force a fetch.
+  if (!needPriceFetch && now >= 1000000000) {
+    struct tm localNow;
+    if (timeToLocalStruct(now, localNow)) {
+      if (localNow.tm_hour == 16 && !rtcFetchedAfter4pm) {
+        needPriceFetch = true;
+        logWithTimestamp("Smart fetch: 16:00 window for next-day prices.");
+      }
+      // Reset the flag after midnight so we fetch again tomorrow
+      if (localNow.tm_hour < 16) {
+        rtcFetchedAfter4pm = false;
+      }
+    }
+  }
+
+  // Early drift calibration: sync at ~15min and ~1hr to get accurate drift
+  // measurements quickly, then rely on regular price-fetch syncs thereafter.
+  // Boot 1 = 0min, boot 2 = 15min, boot 5 = 1hr
+  bool needEarlyDriftSync = (rtcBootCount == 2 || rtcBootCount == 5) &&
       now >= 1000000000 && rtcLastCorrectionTime > 0;
 
   bool needWiFi = needPriceFetch || needEarlyDriftSync || (now < 1000000000);
@@ -769,7 +798,7 @@ void setup() {
             double measuredDriftPerHour = (double)driftSeconds / elapsedHours;
             // Smooth with previous measurement to avoid jumps from network latency
             if (rtcDriftPerHour != 0.0) {
-              rtcDriftPerHour = rtcDriftPerHour * 0.7 + measuredDriftPerHour * 0.3;
+              rtcDriftPerHour = rtcDriftPerHour * 0.5 + measuredDriftPerHour * 0.5;
             } else {
               rtcDriftPerHour = measuredDriftPerHour;
             }
@@ -782,6 +811,7 @@ void setup() {
         }
         rtcLastTimeSync = now;
         rtcLastCorrectionTime = now;
+        rtcAccumulatedDrift = 0.0;  // Reset accumulator — NTP is ground truth
       }
     }
 
@@ -791,6 +821,11 @@ void setup() {
       if (fetchCurrentPrice()) {
         now = time(nullptr);
         rtcLastPriceFetch = now;
+        // Track whether we've fetched during the 16:00 window today
+        struct tm fetchLocal;
+        if (timeToLocalStruct(now, fetchLocal) && fetchLocal.tm_hour >= 16) {
+          rtcFetchedAfter4pm = true;
+        }
       }
     }
 
@@ -852,6 +887,17 @@ void setup() {
 
     // Add a small buffer to ensure we're past the boundary
     sleepSeconds += 5;
+
+    // Pre-compensate sleep duration for RTC oscillator drift.
+    // If the RTC runs fast (positive drift), each RTC-second is shorter than a
+    // real second, so we need more RTC-seconds to cover the same wall-clock time.
+    // If the RTC runs slow (negative drift), we need fewer RTC-seconds.
+    if (rtcDriftPerHour != 0.0) {
+      double sleepHours = (double)sleepSeconds / 3600.0;
+      long adjusted = (long)sleepSeconds + (long)(rtcDriftPerHour * sleepHours + 0.5);
+      if (adjusted < 60) adjusted = 60;  // safety floor
+      sleepSeconds = (time_t)adjusted;
+    }
 
     logWithTimestamp("Entering deep sleep mode.");
     enterDeepSleep(sleepSeconds);
