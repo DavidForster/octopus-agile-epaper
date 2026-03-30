@@ -59,7 +59,7 @@ const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // Fetch prices every 6 hours
 RTC_DATA_ATTR time_t rtcLastPriceFetch = 0;
 RTC_DATA_ATTR time_t rtcLastTimeSync = 0;
 RTC_DATA_ATTR int rtcBootCount = 0;
-RTC_DATA_ATTR int rtcLastDisplayedRateIndex = -1;  // Track which rate was last displayed
+RTC_DATA_ATTR time_t rtcLastDisplayedRateStart = 0; // validFrom of last-displayed current slot
 RTC_DATA_ATTR int rtcRefreshCounter = 0;            // Counter for periodic full refresh
 
 // Drift compensation: measure RTC drift at each NTP sync and correct between syncs
@@ -71,10 +71,12 @@ RTC_DATA_ATTR time_t rtcLastCorrectionTime = 0;  // When we last applied/measure
 // Graph display constants
 const double PRICE_GRID_INTERVAL = 5.0;                   // Grid line every 5 pence
 const int HOUR_LABEL_INTERVAL = 2;                        // Show hour label every 2 hours
-const int MAX_RATES = 60;                                 // Buffer size for rate data
+const int MAX_RATES = 60;                                 // Display window buffer size
+const int FETCH_MAX_RATES = 100;                          // Buffer for full 48-hr fetch (~96 slots)
+const int MIN_PAST_SLOTS = 6;                             // Minimum past slots in display window (3 hrs)
 
 // Bar sizing (adjust these to change appearance)
-const int EXPECTED_SLOTS = 46;                            // Expected number of 30-min slots (0:00 to 23:00)
+const int EXPECTED_SLOTS = 46;                            // Display window width in 30-min slots (23 hrs)
 const int BAR_WIDTH = 5;                                  // Bar width in pixels (odd number for centering)
 const int BAR_GAP = 1;                                    // Total gap per slot (1px each side of bar)
 
@@ -87,7 +89,9 @@ struct RateData {
   time_t validFrom;
   double price;
 };
-RTC_DATA_ATTR RateData rates[MAX_RATES];
+RTC_DATA_ATTR RateData fetchedRates[FETCH_MAX_RATES]; // Full 48-hr fetched data
+RTC_DATA_ATTR int fetchedRateCount = 0;
+RTC_DATA_ATTR RateData rates[MAX_RATES];              // Current display window
 RTC_DATA_ATTR int rateCount = 0;
 RTC_DATA_ATTR int currentRateIndex = -1;
 RTC_DATA_ATTR time_t graphStartTime = 0;  // Store the start time of the graph for axis labels
@@ -451,33 +455,12 @@ bool fetchCurrentPrice() {
     now = time(nullptr);
   }
 
-  struct tm currentInfo;
-  if (!timeToLocalStruct(now, currentInfo)) {
-    logWithTimestamp("Time conversion failed.");
-    return false;
-  }
-
-  // Fetch prices for the current local day. Around DST changes this window can
-  // be 23 or 25 hours long, so derive it from local midnight instead of
-  // assuming a fixed 86400-second day.
-  currentInfo.tm_hour = 0;
-  currentInfo.tm_min = 0;
-  currentInfo.tm_sec = 0;
-  time_t periodStart = mktime(&currentInfo);
-  if (periodStart < 0) {
-    logWithTimestamp("Failed to calculate local midnight.");
-    return false;
-  }
-
-  struct tm nextDayInfo = currentInfo;
-  nextDayInfo.tm_mday += 1;
-  time_t periodEnd = mktime(&nextDayInfo);
-  if (periodEnd < 0) {
-    logWithTimestamp("Failed to calculate next local midnight.");
-    return false;
-  }
-
-  graphStartTime = periodStart;                        // Store for axis labels
+  // Fetch a 48-hour window centred on now (rounded to slot boundaries).
+  // This ensures today's prices are always present, and tomorrow's are included
+  // as soon as Octopus releases them (~16:00 the day before).
+  time_t slotNow = (now / RATE_SLOT_DURATION) * RATE_SLOT_DURATION;
+  time_t periodStart = slotNow - 24 * 3600;
+  time_t periodEnd   = slotNow + 24 * 3600;
 
   struct tm periodStartInfo, periodEndInfo;
   if (!timeToUtcStruct(periodStart, periodStartInfo)) {
@@ -487,10 +470,12 @@ bool fetchCurrentPrice() {
     return false;
   }
 
-  char currentIso[25];
+  char nowIso[25];
   char periodStartIso[25];
   char periodEndIso[25];
-  strftime(currentIso, sizeof(currentIso), "%Y-%m-%dT%H:%M:%SZ", &currentInfo);
+  struct tm nowInfo;
+  timeToUtcStruct(now, nowInfo);
+  strftime(nowIso, sizeof(nowIso), "%Y-%m-%dT%H:%M:%SZ", &nowInfo);
   strftime(periodStartIso, sizeof(periodStartIso), "%Y-%m-%dT%H:%M:%SZ", &periodStartInfo);
   strftime(periodEndIso, sizeof(periodEndIso), "%Y-%m-%dT%H:%M:%SZ", &periodEndInfo);
 
@@ -498,7 +483,7 @@ bool fetchCurrentPrice() {
   url += OCTOPUS_PRODUCT_CODE;
   url += "/electricity-tariffs/";
   url += OCTOPUS_TARIFF_CODE;
-  url += "/standard-unit-rates/?period_from=";
+  url += "/standard-unit-rates/?page_size=100&period_from=";
   url += periodStartIso;
   url += "&period_to=";
   url += periodEndIso;
@@ -547,42 +532,85 @@ bool fetchCurrentPrice() {
   Serial.print(results.size());
   Serial.println(" rate periods");
   Serial.print("Current time (UTC): ");
-  Serial.println(currentIso);
+  Serial.println(nowIso);
 
-  // Store all rates for graphing
-  rateCount = 0;
+  // Store into fetchedRates[] (full 48-hr buffer; display window selected separately)
+  fetchedRateCount = 0;
   for (JsonObject rate : results) {
-    // Store rate data for graphing with actual timestamps
-    if (rateCount < MAX_RATES) {
+    if (fetchedRateCount < FETCH_MAX_RATES) {
       const char* validFromStr = rate["valid_from"] | "";
       double priceVal = rate["value_inc_vat"] | 0.0;
 
       if (strlen(validFromStr) > 0) {
-        rates[rateCount].price = priceVal;
-        rates[rateCount].validFrom = parseISOTimestamp(validFromStr);
-        rateCount++;
+        fetchedRates[fetchedRateCount].price = priceVal;
+        fetchedRates[fetchedRateCount].validFrom = parseISOTimestamp(validFromStr);
+        fetchedRateCount++;
       }
     }
   }
 
-  Serial.print("Stored ");
-  Serial.print(rateCount);
-  Serial.println(" rates for graphing.");
+  Serial.print("Fetched ");
+  Serial.print(fetchedRateCount);
+  Serial.println(" rates.");
 
-  // Reverse the rates array to get chronological order (API returns newest first)
-  for (int i = 0; i < rateCount / 2; i++) {
-    RateData temp = rates[i];
-    rates[i] = rates[rateCount - 1 - i];
-    rates[rateCount - 1 - i] = temp;
-  }
-
-  // Cap to expected slots (46 slots from 0:00 to 23:00)
-  if (rateCount > EXPECTED_SLOTS) {
-    rateCount = EXPECTED_SLOTS;
+  // Reverse to chronological order (API returns newest first)
+  for (int i = 0; i < fetchedRateCount / 2; i++) {
+    RateData temp = fetchedRates[i];
+    fetchedRates[i] = fetchedRates[fetchedRateCount - 1 - i];
+    fetchedRates[fetchedRateCount - 1 - i] = temp;
   }
 
   logWithTimestamp("Price fetch complete.");
   return true;
+}
+
+// Select which 46-slot window of fetchedRates[] to display.
+// Always shows at least MIN_PAST_SLOTS (3 hrs) before the current slot.
+// If future data doesn't fill the window, slides further back to show more past.
+void selectDisplayWindow() {
+  if (fetchedRateCount <= 0) return;
+
+  time_t now = time(nullptr);
+  if (now < 1000000000) return;
+
+  // Find the slot we're currently in
+  int currentFetchedIndex = -1;
+  for (int i = 0; i < fetchedRateCount; i++) {
+    time_t slotEnd = (i < fetchedRateCount - 1)
+        ? fetchedRates[i + 1].validFrom
+        : fetchedRates[i].validFrom + RATE_SLOT_DURATION;
+    if (now >= fetchedRates[i].validFrom && now < slotEnd) {
+      currentFetchedIndex = i;
+      break;
+    }
+  }
+
+  int start;
+  if (currentFetchedIndex < 0) {
+    // Current time outside fetched range — show as much as fits from the start
+    start = 0;
+  } else {
+    // Ideal: show exactly MIN_PAST_SLOTS before current slot.
+    // Slide back only if there isn't enough future data to fill the window.
+    int desiredStart = currentFetchedIndex - MIN_PAST_SLOTS;
+    int latestStart  = fetchedRateCount - EXPECTED_SLOTS; // keep window full if possible
+    start = max(0, min(desiredStart, latestStart));
+  }
+
+  int count = min(EXPECTED_SLOTS, fetchedRateCount - start);
+  for (int i = 0; i < count; i++) {
+    rates[i] = fetchedRates[start + i];
+  }
+  rateCount = count;
+  graphStartTime = (rateCount > 0) ? rates[0].validFrom : 0;
+  currentRateIndex = (currentFetchedIndex >= 0) ? (currentFetchedIndex - start) : -1;
+
+  Serial.print("Display window: slots ");
+  Serial.print(start);
+  Serial.print(" to ");
+  Serial.print(start + count - 1);
+  Serial.print(", current slot index in window: ");
+  Serial.println(currentRateIndex);
 }
 
 void drawPriceGraph(int x, int y, int width, int height) {
@@ -702,8 +730,8 @@ void setup() {
       Serial.println("\nWiFi connection failed!");
       logWithTimestamp("WiFi connection failed.");
       // If we have rate data, update display anyway and sleep
-      if (rateCount > 0) {
-        updateCurrentRateIndexFromNow();
+      if (fetchedRateCount > 0) {
+        selectDisplayWindow();
         updateDisplay();
       }
       enterDeepSleep(WAKE_INTERVAL_S);
@@ -767,17 +795,23 @@ void setup() {
     applyDriftCorrection();
   }
 
-  // Update current rate index based on current time
-  updateCurrentRateIndexFromNow();
+  // Recalculate display window and current rate index from fetched data
+  selectDisplayWindow();
 
   // Determine if display update is needed
   bool needDisplayUpdate = false;
   if (rateCount > 0) {
+    // Use the validFrom timestamp of the current slot for change detection —
+    // the window-relative index is intentionally stable, so comparing timestamps
+    // is the only reliable way to detect a slot advance.
+    time_t currentRateStart = (currentRateIndex >= 0 && currentRateIndex < rateCount)
+        ? rates[currentRateIndex].validFrom : 0;
+
     // Update display if:
     // 1. Current rate slot has changed (rate updates every 30 min)
-    // 2. Price data was just fetched (new graph data)
+    // 2. Price data was just fetched (new graph data / window may have shifted)
     // 3. Every 4 wakes (~1 hour) for periodic full refresh to prevent ghosting
-    if (currentRateIndex != rtcLastDisplayedRateIndex) {
+    if (currentRateStart != rtcLastDisplayedRateStart) {
       logWithTimestamp("Rate slot changed - updating display.");
       needDisplayUpdate = true;
     } else if (needPriceFetch && rtcLastPriceFetch == now) {
@@ -791,7 +825,7 @@ void setup() {
 
     if (needDisplayUpdate) {
       updateDisplay();
-      rtcLastDisplayedRateIndex = currentRateIndex;
+      rtcLastDisplayedRateStart = currentRateStart;
     } else {
       logWithTimestamp("Display unchanged - skipping update to save power.");
     }
