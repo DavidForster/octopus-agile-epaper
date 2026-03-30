@@ -53,7 +53,7 @@ const int HOUR_LABEL_Y_OFFSET = 5;          // Gap between graph and hour labels
 const time_t SECONDS_PER_DAY = 86400;
 const time_t RATE_SLOT_DURATION = 1800;  // 30 minutes
 const time_t WAKE_INTERVAL_S = 900;      // Wake every 15 minutes (quarter-hour)
-const time_t PRICE_FETCH_INTERVAL_S = 6 * 60 * 60; // Fetch prices every 6 hours
+const time_t PRICE_FETCH_INTERVAL_S = 1 * 60 * 60; // Fetch prices every hour
 
 // RTC memory variables (persist across deep sleep)
 RTC_DATA_ATTR time_t rtcLastPriceFetch = 0;
