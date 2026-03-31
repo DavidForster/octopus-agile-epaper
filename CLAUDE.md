@@ -49,21 +49,23 @@ Before building, copy `src/credentials.h.example` to `src/credentials.h` and fil
 The core execution model is: wake → do work → sleep. RTC memory (`RTC_DATA_ATTR`) persists all state across sleep cycles:
 - `rates[]` / `rateCount` — cached price data (up to 60 slots)
 - `rtcLastPriceFetch` — timestamp of last API call (throttled to every 6 hours)
-- `rtcBootCount` — used to schedule early drift calibration syncs (boots 2, 3, 5)
-- `rtcDriftPerHour` / `rtcLastCorrectionTime` — RTC drift compensation values
+- `rtcBootCount` — used to schedule early drift calibration syncs (boots 2, 5)
+- `rtcDriftPerHour` / `rtcLastCorrectionTime` / `rtcAccumulatedDrift` — RTC drift compensation values (including sub-second accumulator)
+- `rtcFetchedAfter4pm` — tracks whether prices have been fetched during today's 16:00 window
 - `rtcLastDisplayedRateIndex` / `rtcRefreshCounter` — display update throttling
 
-The device sleeps until the next 15-minute boundary (`:00`, `:15`, `:30`, `:45`) plus a 5-second buffer.
+The device sleeps until the next 15-minute boundary (`:00`, `:15`, `:30`, `:45`) plus a 5-second buffer. The sleep duration is pre-compensated for measured RTC oscillator drift to prevent progressive lag.
 
 ### WiFi & Time Sync Strategy
 
 WiFi is only enabled when needed:
 1. First boot or no rate data
 2. 6-hour price fetch interval elapsed
-3. Early drift calibration syncs (boots 2, 3, 5 to rapidly characterise RTC drift)
-4. Time not set
+3. Smart fetch at 16:00 local time to capture next-day prices (Octopus publishes ~16:00)
+4. Early drift calibration syncs (boots 2, 5 to rapidly characterise RTC drift)
+5. Time not set
 
-When WiFi is active, time is always re-synced (NTP via `pool.ntp.org`, fallback to `worldtimeapi.org` HTTP API). After NTP sync, the measured drift between the previous RTC time and NTP time is recorded and smoothed (70/30 EWMA) into `rtcDriftPerHour`. Between syncs, `applyDriftCorrection()` adjusts `settimeofday()` based on elapsed time × drift rate.
+When WiFi is active, time is always re-synced (NTP via `pool.ntp.org`, fallback to `worldtimeapi.org` HTTP API). After NTP sync, the measured drift between the previous RTC time and NTP time is recorded and smoothed (50/50 EWMA) into `rtcDriftPerHour`. Between syncs, `applyDriftCorrection()` adjusts `settimeofday()` based on elapsed time × drift rate, with a sub-second accumulator to prevent truncation losses.
 
 All timestamps are UTC internally. The Octopus API returns ISO 8601 UTC strings; `parseISOTimestamp()` converts these to `time_t`.
 
