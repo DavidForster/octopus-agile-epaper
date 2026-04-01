@@ -467,7 +467,7 @@ bool fetchCurrentPrice() {
   time_t now = time(nullptr);
   if (now < 1000000000) {
     logWithTimestamp("Time not set - attempting to sync again.");
-    if (!waitForTimeSync() && !syncTimeFromHttp()) {
+    if (!waitForNtpSync() && !syncTimeFromHttp()) {
       return false;
     }
     now = time(nullptr);
