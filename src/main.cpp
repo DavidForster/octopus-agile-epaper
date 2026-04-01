@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include "credentials.h"  // WiFi credentials
 #include <esp_sleep.h>
+#include <esp_sntp.h>
 
 // Pin definitions for ESP32 SPI connection
 #define EPD_CS    5
@@ -151,22 +152,19 @@ void applyDriftCorrection() {
   Serial.println("s)");
 }
 
-bool waitForTimeSync() {
-  time_t now = time(nullptr);
-  int attempts = 0;
-  while ((now < 1000000000) && (attempts < 40)) {  // wait until reasonable epoch
+bool waitForNtpSync() {
+  // Wait for SNTP to report a completed sync — not just "clock is already set".
+  // sntp_get_sync_status() returns SNTP_SYNC_STATUS_COMPLETED once the NTP
+  // response arrives and the system clock is updated with that value.
+  for (int i = 0; i < 40; i++) {
     delay(500);
-    now = time(nullptr);
-    attempts++;
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+      logWithTimestamp("Time synchronized via NTP.");
+      return true;
+    }
   }
-
-  if (now < 1000000000) {
-    logWithTimestamp("Unable to get valid time from NTP.");
-    return false;
-  }
-
-  logWithTimestamp("Time synchronized via NTP.");
-  return true;
+  logWithTimestamp("NTP sync timed out.");
+  return false;
 }
 
 bool syncTimeFromHttp() {
@@ -213,7 +211,7 @@ bool syncTimeFromHttp() {
   Serial.println(unixTime);
   logWithTimestamp("Time synchronized via HTTP.");
 
-  return waitForTimeSync();
+  return time(nullptr) >= 1000000000;
 }
 
 bool timeToUtcStruct(time_t timestamp, struct tm& out) {
@@ -469,7 +467,7 @@ bool fetchCurrentPrice() {
   time_t now = time(nullptr);
   if (now < 1000000000) {
     logWithTimestamp("Time not set - attempting to sync again.");
-    if (!waitForTimeSync() && !syncTimeFromHttp()) {
+    if (!waitForNtpSync() && !syncTimeFromHttp()) {
       return false;
     }
     now = time(nullptr);
@@ -783,28 +781,40 @@ void setup() {
       // Capture RTC time before NTP sync to measure drift
       time_t rtcTimeBeforeSync = time(nullptr);
 
+      // Reset sync status so we can detect this specific sync completing —
+      // without this, sntp_get_sync_status() may already be COMPLETED from a
+      // previous boot and waitForNtpSync() would return without any real sync.
+      sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
       configTzTime(LOCAL_TIMEZONE, "pool.ntp.org", "time.nist.gov", "time.google.com");
       logWithTimestamp("Time sync starting.");
-      if (!waitForTimeSync()) {
+      if (!waitForNtpSync()) {
+        // NTP timed out — fall back to HTTP time API
         syncTimeFromHttp();
       }
       now = time(nullptr);
       if (now >= 1000000000) {
-        // Measure and record drift rate
-        if (rtcTimeBeforeSync >= 1000000000 && rtcLastCorrectionTime > 0) {
-          double elapsedHours = (double)(rtcTimeBeforeSync - rtcLastCorrectionTime) / 3600.0;
+        // Measure and record drift rate.
+        // Use rtcLastTimeSync (last confirmed NTP sync) for elapsed, not
+        // rtcLastCorrectionTime — the latter is updated every 15-minute
+        // non-WiFi wake, keeping the window too short to measure meaningfully.
+        if (rtcTimeBeforeSync >= 1000000000 && rtcLastTimeSync > 0) {
+          double elapsedHours = (double)(rtcTimeBeforeSync - rtcLastTimeSync) / 3600.0;
           if (elapsedHours >= 0.5) {  // Need at least 30 min for a meaningful measurement
+            // driftSeconds is the residual clock error after any corrections that
+            // were applied during non-WiFi wakes.  The true drift rate = existing
+            // model + the residual rate, so EWMA against that composite value to
+            // avoid the estimate decaying toward zero when corrections are working.
             long driftSeconds = rtcTimeBeforeSync - now;
-            double measuredDriftPerHour = (double)driftSeconds / elapsedHours;
-            // Smooth with previous measurement to avoid jumps from network latency
+            double residualDriftPerHour = (double)driftSeconds / elapsedHours;
+            double trueDriftEstimate = rtcDriftPerHour + residualDriftPerHour;
             if (rtcDriftPerHour != 0.0) {
-              rtcDriftPerHour = rtcDriftPerHour * 0.5 + measuredDriftPerHour * 0.5;
+              rtcDriftPerHour = rtcDriftPerHour * 0.5 + trueDriftEstimate * 0.5;
             } else {
-              rtcDriftPerHour = measuredDriftPerHour;
+              rtcDriftPerHour = trueDriftEstimate;  // first measurement: raw drift
             }
-            Serial.print("RTC drift measured: ");
-            Serial.print(measuredDriftPerHour, 4);
-            Serial.print("s/hr, smoothed: ");
+            Serial.print("RTC drift measured (residual): ");
+            Serial.print(residualDriftPerHour, 4);
+            Serial.print("s/hr, smoothed estimate: ");
             Serial.print(rtcDriftPerHour, 4);
             Serial.println("s/hr");
           }
