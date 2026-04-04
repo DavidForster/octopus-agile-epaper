@@ -59,7 +59,9 @@ static void drawGridLinesAndLabels(int x, int y, int width, int height,
   for (double price = minPrice; price <= maxPrice; price += PRICE_GRID_INTERVAL) {
     int gridY = y + height - (int)((price - minPrice) / priceRange * height);
 
-    if (price == minPrice) {
+    // Solid line at zero when range spans negative; otherwise solid at the bottom (minPrice)
+    bool isSolid = (minPrice < 0) ? (fabs(price) < 0.001) : (price == minPrice);
+    if (isSolid) {
       // Solid baseline
       display.drawLine(x, gridY, x + width, gridY, GxEPD_BLACK);
     } else {
@@ -82,28 +84,38 @@ static void drawGridLinesAndLabels(int x, int y, int width, int height,
 
 static void drawPriceBars(int x, int y, int width, int height,
                           double minPrice, double priceRange, double medianPrice) {
+  // Zero line Y position — clamped to chart bounds (handles all-positive case)
+  int zeroY = constrain(y + height - (int)((0.0 - minPrice) / priceRange * height), y, y + height);
+
   for (int i = 0; i < rateCount; i++) {
-    int slotStartX = x + (i * SLOT_WIDTH);
-    int barX       = slotStartX + (BAR_GAP / 2);
-    int barHeight  = (int)((rates[i].price - minPrice) / priceRange * height);
-    int barY       = y + height - barHeight;
+    int    slotStartX = x + (i * SLOT_WIDTH);
+    int    barX       = constrain(slotStartX + (BAR_GAP / 2), x, x + width);
+    double price      = rates[i].price;
+    bool   isExpensive = (price > medianPrice);
 
-    barX      = constrain(barX,      x, x + width);
-    barY      = constrain(barY,      y, y + height);
-    barHeight = constrain(barHeight, 0, height);
+    if (price >= 0) {
+      int barHeight = constrain((int)(price / priceRange * height), 0, height);
+      if (barHeight == 0) continue;
+      int barY = zeroY - barHeight;
 
-    if (rates[i].price > medianPrice) {
-      // Expensive — filled black
-      display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_BLACK);
+      display.fillRect(barX, barY, BAR_WIDTH, barHeight, isExpensive ? GxEPD_BLACK : GxEPD_WHITE);
+      // Three-sided border: top + sides (no bottom — bar sits on zero line)
+      display.drawLine(barX,                 barY,             barX,                 barY + barHeight - 1, GxEPD_BLACK);
+      display.drawLine(barX + BAR_WIDTH - 1, barY,             barX + BAR_WIDTH - 1, barY + barHeight - 1, GxEPD_BLACK);
+      display.drawLine(barX,                 barY,             barX + BAR_WIDTH - 1, barY,                 GxEPD_BLACK);
     } else {
-      // Cheap — white with border
-      display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_WHITE);
-    }
+      int barHeight = constrain((int)((-price) / priceRange * height), 0, height);
+      if (barHeight == 0) continue;
+      int barY = zeroY;
 
-    // Three-sided border (no bottom — bars sit on baseline)
-    display.drawLine(barX,              barY, barX,              barY + barHeight - 1, GxEPD_BLACK);
-    display.drawLine(barX + BAR_WIDTH - 1, barY, barX + BAR_WIDTH - 1, barY + barHeight - 1, GxEPD_BLACK);
-    display.drawLine(barX, barY, barX + BAR_WIDTH - 1, barY, GxEPD_BLACK);
+      // Negative prices are always cheap — white with border
+      display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_WHITE);
+      // Four-sided border — top restores the zero line overwritten by fillRect
+      display.drawLine(barX,                 barY,             barX,                 barY + barHeight - 1, GxEPD_BLACK);
+      display.drawLine(barX + BAR_WIDTH - 1, barY,             barX + BAR_WIDTH - 1, barY + barHeight - 1, GxEPD_BLACK);
+      display.drawLine(barX,                 barY,             barX + BAR_WIDTH - 1, barY,                 GxEPD_BLACK);
+      display.drawLine(barX,                 barY + barHeight - 1, barX + BAR_WIDTH - 1, barY + barHeight - 1, GxEPD_BLACK);
+    }
   }
 }
 
