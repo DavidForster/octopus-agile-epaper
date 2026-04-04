@@ -143,6 +143,15 @@ static void drawTimeLabels(int x, int y, int width, int height) {
   }
 }
 
+static void drawNegativeZoneShading(int x, int zeroY, int width, int bottom) {
+  // Sparse dot pattern (every 3px) to shade the below-zero region
+  for (int py = zeroY + 1; py <= bottom; py += 3) {
+    for (int px = x; px <= x + width; px += 3) {
+      display.drawPixel(px, py, GxEPD_BLACK);
+    }
+  }
+}
+
 static void drawCurrentTimeSlot(int x, int y, int width, int height) {
   if (currentRateIndex >= 0 && currentRateIndex < rateCount) {
     int slotStartX = x + (currentRateIndex * SLOT_WIDTH);
@@ -160,6 +169,10 @@ static void drawPriceGraph(int x, int y, int width, int height) {
   PriceStats stats  = calculatePriceStats();
   double priceRange = stats.maxPrice - stats.minPrice;
 
+  if (stats.minPrice < 0) {
+    int zeroY = constrain(y + height - (int)((0.0 - stats.minPrice) / priceRange * height), y, y + height);
+    drawNegativeZoneShading(x, zeroY, width, y + height);
+  }
   drawGridLinesAndLabels(x, y, width, height, stats.minPrice, stats.maxPrice, priceRange);
   drawCurrentTimeSlot(x, y, width, height);
   drawPriceBars(x, y, width, height, stats.minPrice, priceRange, stats.medianPrice);
