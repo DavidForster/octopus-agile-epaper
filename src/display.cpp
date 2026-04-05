@@ -74,12 +74,13 @@ static void drawGridLinesAndLabels(int x, int y, int width, int height,
       }
     }
 
-    // Y-axis label on the right — clamp so it doesn't overflow the display edge
+    // Y-axis label on the right — drop "p" suffix if it would overflow the display edge
     char label[10];
     snprintf(label, sizeof(label), "%.0fp", price);
-    int labelWidth = strlen(label) * 6;  // default font is 6px per char
-    int labelX = min(x + width + Y_LABEL_OFFSET, DISPLAY_WIDTH - labelWidth);
-    display.setCursor(labelX, gridY + Y_LABEL_VERTICAL_OFFSET);
+    if (x + width + Y_LABEL_OFFSET + (int)(strlen(label) * 6) > DISPLAY_WIDTH) {
+      snprintf(label, sizeof(label), "%.0f", price);
+    }
+    display.setCursor(x + width + Y_LABEL_OFFSET, gridY + Y_LABEL_VERTICAL_OFFSET);
     display.print(label);
   }
 }
