@@ -46,6 +46,7 @@ const int Y_LABEL_OFFSET           = 2;    // Gap between graph and price labels
 const int Y_LABEL_VERTICAL_OFFSET  = -3;   // Vertical adjustment for price labels
 const int HOUR_LABEL_CENTER_OFFSET = 1;    // Fine-tune horizontal centering of hour labels
 const int HOUR_LABEL_Y_OFFSET      = 5;    // Gap between graph and hour labels (bottom)
+const int DISPLAY_WIDTH            = 296;  // Physical display width after 90° rotation
 
 // Rate data structure
 struct RateData {
