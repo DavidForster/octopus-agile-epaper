@@ -74,9 +74,12 @@ static void drawGridLinesAndLabels(int x, int y, int width, int height,
       }
     }
 
-    // Y-axis label on the right
+    // Y-axis label on the right — drop "p" suffix if it would overflow the display edge
     char label[10];
     snprintf(label, sizeof(label), "%.0fp", price);
+    if (x + width + Y_LABEL_OFFSET + (int)(strlen(label) * 6) > DISPLAY_WIDTH) {
+      snprintf(label, sizeof(label), "%.0f", price);
+    }
     display.setCursor(x + width + Y_LABEL_OFFSET, gridY + Y_LABEL_VERTICAL_OFFSET);
     display.print(label);
   }
