@@ -87,8 +87,13 @@ static void drawGridLinesAndLabels(int x, int y, int width, int height,
 
 static void drawPriceBars(int x, int y, int width, int height,
                           double minPrice, double priceRange, double medianPrice) {
-  // Zero line Y position — clamped to chart bounds (handles all-positive case)
-  int zeroY = constrain(y + height - (int)((0.0 - minPrice) / priceRange * height), y, y + height);
+  // When the range is all-positive, bars sit on the minPrice baseline (chart
+  // bottom), matching the solid gridline drawn there. Only when the range
+  // spans negative values do bars anchor to the true zero line instead.
+  bool hasNegative = (minPrice < 0);
+  int  baselineY   = hasNegative
+      ? constrain(y + height - (int)((0.0 - minPrice) / priceRange * height), y, y + height)
+      : y + height;
 
   for (int i = 0; i < rateCount; i++) {
     int    slotStartX = x + (i * SLOT_WIDTH);
@@ -97,19 +102,20 @@ static void drawPriceBars(int x, int y, int width, int height,
     bool   isExpensive = (price > medianPrice);
 
     if (price >= 0) {
-      int barHeight = constrain((int)(price / priceRange * height), 0, height);
+      double value      = hasNegative ? price : (price - minPrice);
+      int    barHeight  = constrain((int)(value / priceRange * height), 0, height);
       if (barHeight == 0) continue;
-      int barY = zeroY - barHeight;
+      int barY = baselineY - barHeight;
 
       display.fillRect(barX, barY, BAR_WIDTH, barHeight, isExpensive ? GxEPD_BLACK : GxEPD_WHITE);
-      // Three-sided border: top + sides (no bottom — bar sits on zero line)
+      // Three-sided border: top + sides (no bottom — bar sits on the baseline)
       display.drawLine(barX,                 barY,             barX,                 barY + barHeight - 1, GxEPD_BLACK);
       display.drawLine(barX + BAR_WIDTH - 1, barY,             barX + BAR_WIDTH - 1, barY + barHeight - 1, GxEPD_BLACK);
       display.drawLine(barX,                 barY,             barX + BAR_WIDTH - 1, barY,                 GxEPD_BLACK);
     } else {
       int barHeight = constrain((int)((-price) / priceRange * height), 0, height);
       if (barHeight == 0) continue;
-      int barY = zeroY;
+      int barY = baselineY;
 
       // Negative prices are always cheap — white with border
       display.fillRect(barX, barY, BAR_WIDTH, barHeight, GxEPD_WHITE);
