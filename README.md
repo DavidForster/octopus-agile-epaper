@@ -41,7 +41,14 @@ An ESP32-based e-paper display that shows today's Octopus Energy Agile electrici
 
 ### Configuration
 
-Copy the credentials template and fill in your details:
+**WiFi** is set up on the device, not in source. On first boot (or if no network is stored) the display shows setup instructions:
+
+1. Connect your phone or laptop to the `Agile-Display-Setup` WiFi network.
+2. A setup page opens (or browse to `192.168.4.1`). Choose your home network and enter its password.
+
+Credentials are stored in flash and survive deep sleep and power cycles. The setup portal also starts if connecting fails on 3 consecutive wakes (for example after changing router), and closes after 3 minutes if unused so the device goes back to sleep.
+
+**Octopus settings** (optional) default to product `AGILE-24-10-01` and region `E`. To override, copy the template:
 
 ```bash
 cp src/credentials.h.example src/credentials.h
@@ -50,9 +57,6 @@ cp src/credentials.h.example src/credentials.h
 Edit `src/credentials.h`:
 
 ```cpp
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
 #define OCTOPUS_PRODUCT_CODE "AGILE-24-10-01"  // Check Octopus API for current product code
 #define OCTOPUS_REGION_CODE "E"                 // Your region — see below
 ```
@@ -91,5 +95,6 @@ Price data and RTC state are stored in ESP32 RTC memory, which survives deep sle
 - [GxEPD2](https://github.com/ZinggJM/GxEPD2) — e-paper display driver
 - [Adafruit GFX](https://github.com/adafruit/Adafruit-GFX-Library) — graphics primitives
 - [ArduinoJson](https://arduinojson.org/) — JSON parsing
+- [WiFiManager](https://github.com/tzapu/WiFiManager) — WiFi provisioning captive portal
 
 The project includes a custom e-paper driver (`lib/GxEPD2_290_Custom/`) that fixes a busy-wait timeout issue specific to this display hardware by changing a single update command byte (`0xc7` → `0xc4`).
