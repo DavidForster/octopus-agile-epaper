@@ -1,8 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <esp_sleep.h>
 #include <esp_sntp.h>
+// Optional: credentials.h may still override the Octopus product/region codes.
+// WiFi credentials are provisioned at runtime via the WiFiManager captive portal.
+#if __has_include("credentials.h")
 #include "credentials.h"
+#endif
 #include "globals.h"
 #include "time_utils.h"
 #include "octopus.h"
@@ -25,6 +30,7 @@ RTC_DATA_ATTR RateData rates[MAX_RATES];
 RTC_DATA_ATTR int      rateCount              = 0;
 RTC_DATA_ATTR int      currentRateIndex       = -1;
 RTC_DATA_ATTR time_t   graphStartTime         = 0;
+RTC_DATA_ATTR int      rtcWiFiFailCount       = 0;
 
 // ---- Sleep ----
 
@@ -39,6 +45,60 @@ void enterDeepSleep(time_t sleepSeconds) {
 
   esp_sleep_enable_timer_wakeup(sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
+}
+
+// ---- WiFi ----
+
+static const char* const WIFI_PORTAL_AP_NAME   = "Agile-Display-Setup";
+static const int         WIFI_CONNECT_ATTEMPTS = 20;   // x 500ms = 10s
+static const int         WIFI_FAILS_BEFORE_PORTAL = 3; // consecutive failed wakes
+static const int         WIFI_PORTAL_TIMEOUT_S = 180;
+
+static bool waitForWiFi() {
+  for (int i = 0; i < WIFI_CONNECT_ATTEMPTS && WiFi.status() != WL_CONNECTED; i++) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// Show setup instructions and run the captive portal. Blocks until the user
+// provisions a network or the timeout expires.
+static bool runConfigPortal() {
+  logWithTimestamp("Starting WiFi config portal.");
+  drawWiFiSetupScreen(WIFI_PORTAL_AP_NAME);
+  rtcLastDisplayedRateStart = 0;  // force the price graph to redraw over the instructions
+
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
+  wm.setConnectTimeout(20);
+  wm.setBreakAfterConfig(true);
+  bool ok = wm.startConfigPortal(WIFI_PORTAL_AP_NAME);
+  logWithTimestamp(ok ? "WiFi provisioned." : "WiFi config portal timed out.");
+  return ok;
+}
+
+// Connect using credentials stored in NVS. The portal is only started when
+// nothing is stored, or after several consecutive failed wakes (e.g. the
+// router was replaced) - a single failure just sleeps and retries.
+static bool connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin();  // no args: reuse credentials persisted by the ESP32 WiFi stack
+  bool hasCredentials = WiFi.SSID().length() > 0;
+
+  if (hasCredentials && waitForWiFi()) {
+    rtcWiFiFailCount = 0;
+    return true;
+  }
+
+  rtcWiFiFailCount++;
+  if (hasCredentials && rtcWiFiFailCount < WIFI_FAILS_BEFORE_PORTAL) {
+    return false;
+  }
+
+  rtcWiFiFailCount = 0;
+  return runConfigPortal();
 }
 
 // ---- Main ----
@@ -86,18 +146,8 @@ void setup() {
 
   if (needWiFi) {
     logWithTimestamp("Connecting to WiFi...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
-    }
-
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("\nWiFi connection failed!");
+    if (!connectWiFi()) {
+      Serial.println("WiFi connection failed!");
       logWithTimestamp("WiFi connection failed.");
       if (fetchedRateCount > 0) {
         selectDisplayWindow();
@@ -107,7 +157,6 @@ void setup() {
       return;
     }
 
-    Serial.println("\nWiFi connected!");
     logWithTimestamp("WiFi connected.");
 
     if (needTimeSync) {

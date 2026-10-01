@@ -292,3 +292,35 @@ void updateDisplay() {
   logWithTimestamp("Display update complete.");
   display.hibernate();
 }
+
+void drawWiFiSetupScreen(const char* apName) {
+  logWithTimestamp("Showing WiFi setup screen.");
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    display.setFont();
+
+    display.setTextSize(2);
+    display.setCursor(8, 8);
+    display.print("WiFi setup");
+
+    display.setTextSize(1);
+    display.setCursor(8, 36);
+    display.print("1. Connect your phone to WiFi:");
+    display.setTextSize(2);
+    display.setCursor(24, 50);
+    display.print(apName);
+
+    display.setTextSize(1);
+    display.setCursor(8, 76);
+    display.print("2. Choose your home network and");
+    display.setCursor(8, 88);
+    display.print("   enter its password.");
+    display.setCursor(8, 104);
+    display.print("(Setup page: 192.168.4.1)");
+  } while (display.nextPage());
+  display.setTextSize(1);
+  display.hibernate();
+}

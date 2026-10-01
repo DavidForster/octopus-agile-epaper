@@ -34,9 +34,9 @@ There are no automated tests — the `test/` directory contains only the Platfor
 
 ## Setup
 
-Before building, copy `src/credentials.h.example` to `src/credentials.h` and fill in:
-- WiFi SSID and password
-- Octopus Energy product code and region code (defaults to `AGILE-24-10-01`, region `E` / West Midlands)
+WiFi is provisioned at runtime with WiFiManager: on first boot (no stored credentials) or after 3 consecutive failed connects, the device shows instructions on the e-paper and serves a captive portal (AP `Agile-Display-Setup`, 3-minute timeout). Credentials persist in NVS.
+
+Optionally, copy `src/credentials.h.example` to `src/credentials.h` to override the Octopus product code and region code (defaults `AGILE-24-10-01`, region `E` / West Midlands).
 
 `src/credentials.h` is git-ignored. Never commit it.
 
@@ -49,6 +49,7 @@ Before building, copy `src/credentials.h.example` to `src/credentials.h` and fil
 The core execution model is: wake → do work → sleep. RTC memory (`RTC_DATA_ATTR`) persists all state across sleep cycles:
 - `rates[]` / `rateCount` — cached price data (up to 60 slots)
 - `rtcLastPriceFetch` — timestamp of last API call (throttled to every 6 hours)
+- `rtcWiFiFailCount` — consecutive failed WiFi connects (triggers the config portal at 3)
 - `rtcBootCount` — used to schedule early drift calibration syncs (boots 2, 5)
 - `rtcDriftPerHour` / `rtcLastCorrectionTime` / `rtcAccumulatedDrift` — RTC drift compensation values (including sub-second accumulator)
 - `rtcFetchedAfter4pm` — tracks whether prices have been fetched during today's 16:00 window

@@ -19,3 +19,6 @@ void selectDisplayWindow();
 
 // Perform a full e-ink refresh with the current price graph
 void updateDisplay();
+
+// Show WiFi setup instructions for the given captive-portal access point name
+void drawWiFiSetupScreen(const char* apName);
